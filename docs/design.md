@@ -3,7 +3,7 @@ RcHashMap: Single-threaded, refcounted map with SlotMap-backed storage
 Overview
 - Goal: A HashMap-like structure storing reference-counted key→value pairs. Clients receive Rc-like handles (Ref) that provide identity and lifetime management; all value access happens only through RcHashMap methods to preserve exclusivity and safety.
 - Design: Store Entry<K,V> inline inside a SlotMap for stable, generational keys; maintain a separate raw index keyed by a precomputed u64 hash that maps to SlotMap slots. A Ref identifies entries by the SlotMap key. All value access uses RcHashMap::{access, access_mut}, which return references whose lifetimes are tied to both the map borrow and the provided Ref. This prevents a Ref from being dropped while its value reference is alive and ensures inserts and other &mut operations cannot run concurrently.
-- Lifecycle model: Each key moves through explicit states — indexed+live (present in index and entries), detached/live (removed from index but kept alive by one or more Refs), and gone (removed from entries). Removal from the index does not invalidate existing Refs.
+- Lifecycle model: Each key has two stable, user-visible states — indexed+live (present in index and entries while at least one Ref exists) and gone (removed from index and entries once the last Ref is dropped). There is no public removal API; removal happens only when the final Ref is dropped.
 - Keepalive-on-drop: The map owns a `Box<Inner>`. If the map is dropped while Refs exist, `Inner` is put into a keepalive state via `Box::into_raw`. The last `Ref` drop removes its entry (if any) and, if no entries remain, reconstructs the box and drops it to free `Inner`.
 - Constraints: Single-threaded; no atomics; no per-entry heap allocations; no global registries. Ref clone/hash/eq/drop are O(1).
 
@@ -48,8 +48,7 @@ Hashing and Equality
 Index Operations (RawTable)
 - Insert: compute u64 hash with the map’s hasher; insert the slot into `index` using that hash. Store the same hash in Entry.
 - Get: compute u64 hash; probe `index` for that hash and linearly check candidate slots’ `entries[slot].key == query_key`.
-- Remove (map API): compute u64 hash; probe for candidates and remove the matching slot from the index if keys are equal. This detaches the entry from the index but does not remove the SlotMap entry while Refs exist. If no Refs exist at removal time, also remove the SlotMap entry eagerly.
-- Remove (last Ref::drop): when an entry’s refcount reaches 0, remove its index record if present (using the precomputed hash in Entry to avoid recomputation), then remove the SlotMap entry.
+- Removal: There is no public removal API. When an entry’s refcount reaches 0 in `Ref::drop`, remove its index record (using the precomputed hash in Entry to avoid recomputation), then remove the SlotMap entry.
 
 Drop and Keepalive
 - Dropping RcHashMap:
@@ -72,7 +71,7 @@ Safety and Invariants
 - Generational keys: ABA on slots is prevented by SlotMap’s generational keys; stale Refs never alias new entries.
 - Refcount bounds: `Ref::clone` uses checked_add; `Ref::drop` uses checked subtraction. `Drop` paths never panic in release builds (under/overflow is guarded by debug assertions only).
 - Keepalive: `keepalive_raw` is set only during `RcHashMap::drop`. Reclamation is guarded by a single successful `take()`; the last `Ref` drops `Inner` only after removing its own slot and observing the SlotMap is empty.
-- Interior mutability and reentrancy: `entries` and `index` are behind `UnsafeCell` to allow `Ref::drop` to remove the last entry without `&mut RcHashMap`. During `Ref::drop`, the index and entries may be transiently inconsistent; lookups must tolerate “index hit with missing slot” and handle it by re-checking the slot. The chosen removal order is index → entries to avoid visibility during destructor execution.
+- Interior mutability and reentrancy: `entries` and `index` are behind `UnsafeCell` to allow `Ref::drop` to remove the last entry without `&mut RcHashMap`. During `Ref::drop`, removal occurs in the order index → entries. Reentrant lookups may observe the key as present (if they run before index removal) or absent (if they run after); they never observe an index entry pointing to a missing slot under this order.
 
 Trait Bounds
 - K: Eq + Hash + Borrow<Q> for lookups; no 'static bound required.
@@ -168,7 +167,7 @@ Testing Plan
 - Access safety: `access`/`access_mut` tie returned reference lifetimes to both the map and the `Ref`; verify that references remain valid while their `Ref` is alive, despite removals of other entries.
 - Identity safety: APIs that take a Ref verify map identity and return None on mismatch.
 - Liveness invariant: while any `Ref` to an entry exists, `access`/`access_mut` return references to that entry.
-- Reentrancy: in `V::drop`, call `get/insert/remove` and ensure lookups tolerate transient index/slot skew and no panics occur.
+- Reentrancy: in `V::drop`, call `get/insert` and ensure lookups behave consistently (present before index removal, absent after) and no panics occur.
 - Stress: repeat insert/get/drop sequences; ensure len reaches 0 after last drop and no panics.
 
 Rationale Recap
