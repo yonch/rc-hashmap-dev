@@ -1,0 +1,16 @@
+[package]
+name = "rc-hashmap"
+version = "0.1.0"
+edition = "2021"
+description = "A HashMap with reference-counted key-value entries."
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["hashmap", "rc", "reference-counted", "shared", "data-structures"]
+categories = ["data-structures"]
+documentation = "https://docs.rs/rc-hashmap"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
