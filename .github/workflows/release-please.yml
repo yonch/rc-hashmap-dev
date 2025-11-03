@@ -19,7 +19,7 @@ jobs:
     steps:
       - name: Release Please
         id: release
-        uses: google-github-actions/release-please-action@v4
+        uses: googleapis/release-please-action@v4
         with:
           release-type: rust
           package-name: rc-hashmap
@@ -32,6 +32,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag_name }}
 
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
