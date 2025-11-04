@@ -98,7 +98,7 @@ Module 3: RcHashMap
   - Clone: `impl Clone for Ref` increments per-entry count via `inc`; overflow is unchecked (UB) to match `Rc`.
   - Drop: decrements per-entry count via `put`; if it reaches 0, performs physical removal. Removal path drops `K`/`V` first and then calls `Rc::decrement_strong_count(raw_rc)`.
   - Hash/Eq: `(owner_ptr, slot)`.
-- Accessors
+  - Accessors
   - `get<Q>(&self, key: &Q) -> Option<Ref>` where `K: Borrow<Q>, Q: Hash + Eq`: delegates to `counted.find(key)` which increments the per-entry refcount upon success.
   - `insert(&mut self, key: K, value: V) -> Result<Ref, InsertError>`: on success, increments the Rc strong count (per-entry) and returns the new `Ref` (unique keys enforced in Module 1).
   - `len(&self) -> usize; is_empty(&self) -> bool` (delegates to Module 2).
@@ -108,6 +108,12 @@ Module 3: RcHashMap
   - Returned references are tied to both the map borrow and the `Ref` lifetime. All `value_mut` methods require `&mut self` on the map to guarantee uniqueness during mutation.
   - Additional queries: `contains_key(&Q) -> bool` is provided; there is no `peek()` that returns `&V` without a `Ref`, to avoid dangling borrows if the last `Ref` is dropped while holding `&V`.
   - Errors: `WrongMap` is a zero-sized error type indicating an owner mismatch. All `Ref` accessors return `Result<_, WrongMap>`.
+  - Accessor lifetime rationale (why `Ref` + `&map`/`&mut map`)
+    - The `Ref` borrow ties the returned reference’s lifetime to the handle, ensuring the entry cannot be removed while the reference is live. Without this, a last `Ref` could be dropped while `&V` persists, invalidating the reference.
+    - The map borrow enforces aliasing and structural safety:
+      - `&RcHashMap` held for the duration of the borrow prevents obtaining `&mut RcHashMap` concurrently, ruling out mutation (e.g., insert/rehash) while `&K`/`&V` is live.
+      - `&mut RcHashMap` for `value_mut` guarantees exclusive access to the entire map during the mutable reference, ruling out other reads/writes and preserving “only one `&mut`” semantics.
+    - Together, these borrows (to `Ref` and to the map) encode: “the entry stays alive” and “no conflicting aliasing or structural mutation occurs” for the lifetime of the returned reference.
   - Iteration:
     - `iter(&self) -> impl Iterator<Item = (Ref<K,V,S>, &K, &V)>` (creates a `Ref` per entry).
     - `iter_mut(&mut self) -> impl Iterator<Item = (Ref<K,V,S>, &K, &mut V)>`.
