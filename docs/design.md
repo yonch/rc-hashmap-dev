@@ -22,12 +22,19 @@ Module 1: IndexedSlotMap
 - API (sketch)
   - new(hasher: S) -> Self
   - find(&self, key: &K) -> Option<DefaultKey>
+  - contains_key<Q>(&self, q: &Q) -> bool where K: Borrow<Q>, Q: ?Sized + Hash + Eq
   - insert(&mut self, key: K, value: V) -> Result<DefaultKey, InsertError>
   - key(&self, slot: DefaultKey) -> Option<&K>
   - value(&self, slot: DefaultKey) -> Option<&V>
   - value_mut(&mut self, slot: DefaultKey) -> Option<&mut V>
   - remove(&mut self, slot: DefaultKey) -> Option<(K, V)>
   - len(&self) -> usize; is_empty(&self) -> bool
+  - iter(&self) -> impl Iterator<Item = (DefaultKey, &K, &V)>
+  - iter_mut(&mut self) -> impl Iterator<Item = ItemGuardMut<'_, K, V>>
+    - Before yielding each item, increments the entry's refcount. Yields an RAII guard that:
+      - exposes `slot() -> DefaultKey`, `key() -> &K`, `value_mut() -> &mut V` (and `DerefMut<Target = V>`),
+      - on Drop, calls `put(slot)` to release the increment.
+    - Using a guard keeps semantics parallel to Module 3 (where `Ref` acts as the guard) and ensures refcount is balanced even on early loop exit.
 - Behavior
   - Indexing: store only DefaultKey in RawTable, keyed by hash; resolve collisions with K: Eq against entries[slot].key.
   - Insertion: compute hash(key); if key exists (found by probing+Eq), return `Err(InsertError::Duplicate)` and do not modify the map. Otherwise, insert into entries first to obtain slot, then insert slot into index under that hash.
@@ -51,11 +58,19 @@ Module 2: CountedIndexedSlotMap
   - value(&self, slot: DefaultKey) -> Option<&V>
   - value_mut(&mut self, slot: DefaultKey) -> Option<&mut V>
   - key(&self, slot: DefaultKey) -> Option<&K>
+  - contains_key<Q>(&self, q: &Q) -> bool where K: Borrow<Q>, Q: ?Sized + Hash + Eq
+    - Probes using the index without incrementing refcounts.
   - put(&self, slot: DefaultKey) -> PutResult
     - Decrements refcount; if it reaches 0, removes the slot from the underlying IndexedSlotMap and returns `PutResult::Removed { key: K, value: V }`. Otherwise returns `PutResult::Live`.
   - inc(&self, slot: DefaultKey)
     - Increments for cloning/duplication of a slot reference; panics on overflow; panics on invalid slot in debug builds.
   - len(&self) -> usize; is_empty(&self) -> bool
+  - iter(&self) -> impl Iterator<Item = ItemGuard<'_, K, V>>
+    - Before yielding each item, increments the entry's refcount. Yields an RAII guard that:
+      - exposes `slot() -> DefaultKey`, `key() -> &K`, `value() -> &V` (and `Deref<Target = V>`),
+      - on Drop, calls `put(slot)` to release the increment.
+    - This ensures `put` is balanced correctly and never runs while `&K`/`&V` are still borrowed.
+  - iter_mut(&mut self) -> impl Iterator<Item = (DefaultKey, &K, &mut V)>
 - Notes
   - Unique-key policy is enforced in Module 1 and reused here unchanged; refcounting is orthogonal.
   - All increments/decrements are interior-mutable and single-threaded.
@@ -64,11 +79,18 @@ Module 2: CountedIndexedSlotMap
 Module 3: RcHashMap
 - Purpose: Public, ergonomic API with `Ref` handles, Rc-based keepalive, and owner identity checks. Internally holds `Rc<Inner>`.
 - Keepalive model (via Rc strong counts)
-  - RcHashMap holds `Rc<Inner>`. `Inner` also stores a raw pointer `raw_rc: *const Inner` obtained from `Rc::as_ptr(&rc)`.
+  - RcHashMap holds `Rc<Inner>`. `Inner` also stores a raw pointer `raw_rc: *const Inner` that is obtained via `Rc::into_raw` on a temporary clone of the `Rc<Inner>`. Immediately after storing this pointer, we call `Rc::decrement_strong_count(raw_rc)` to release the clone, so the baseline strong count remains one (owned by the map). This satisfies the safety preconditions of `increment_strong_count/decrement_strong_count` (pointer obtained via `into_raw`) without holding an extra count.
   - Each live entry contributes one additional strong count: on successful insertion, call `Rc::increment_strong_count(raw_rc)`; on final removal (when the entry’s `refcount` reaches 0 and the slot is removed), call `Rc::decrement_strong_count(raw_rc)`.
   - Dropping RcHashMap drops its own `Rc` handle; if entries still exist, their per-entry strong counts keep `Inner` alive until those entries are removed.
-  - On final removal of the last entry after map drop, the last `decrement_strong_count` frees `Inner`. We call decrement before dropping `K`/`V` so user code in `Drop` runs after `Inner` may already be freed; this is safe because the structure is fully consistent and detached before user code runs.
+  - Final removal order and rationale: we decrement the per-entry strong count before dropping `K`/`V`. This preserves structure invariants before any user code runs. It is safe because removal only happens on the last `Ref` for that entry, so no other `Ref` to that entry remains; and if other `Ref`s to different entries exist, their strong counts prevent `Inner` from being freed by this decrement. The data structure is fully consistent and detached before any user `Drop` executes.
   - Length as an invariant aid: all three layers expose `len()`/`is_empty()`. Although Rc-based keepalive does not require checking `len()==0` to trigger deallocation, `len()==0` on `CountedIndexedSlotMap` precisely indicates “no live entries remain”, which is useful for assertions and tests around last-entry removal.
+  - Refcount rationale (conceptual model → efficient implementation):
+    - Conceptually, every `Ref` keeps two things alive: (1) its specific entry `(K,V)` and (2) the owning map. If implemented literally with `Rc<(K,V)>` stored per entry and an `Rc<Inner>` inside every `Ref`, this would add heap and pointer overhead to every entry and every `Ref` clone.
+    - Instead, we implement the same semantics at lower cost:
+      - Entry liveness is tracked by a per-entry `usize` refcount in `CountedIndexedSlotMap`. Cloning/dropping `Ref` only touches this counter.
+      - Map keepalive is centralized: each live entry contributes exactly one extra `Rc<Inner>` strong count for the entire duration the entry is live (i.e., while its per-entry refcount is ≥ 1). We increment this strong count once on insertion (transition to live), and we decrement it once at final removal (transition to dead). Cloning additional `Ref`s to the same entry does not touch the map’s strong count.
+      - We avoid storing an `Rc` inside each entry. `Inner` holds a self-pointer (`raw_rc`) obtained via `Rc::into_raw` on a temporary clone. We use `Rc::increment_strong_count(raw_rc)` / `Rc::decrement_strong_count(raw_rc)` to manage the per-entry keepalive for the map without extra allocations or pointer fields per entry.
+    - The net effect matches the intuitive model: a `Ref` prevents its entry from being removed, and as long as any entry is live, the map’s `Inner` remains alive. We achieve this without embedding `Rc` in each entry or per-`Ref` heap work.
 - Unique keys policy
   - RcHashMap enforces unique keys by delegating to Module 1’s unique insertion. `insert` fails if the key already exists (no modification).
 - Ref handle
@@ -80,14 +102,20 @@ Module 3: RcHashMap
   - `get<Q>(&self, key: &Q) -> Option<Ref>` where `K: Borrow<Q>, Q: Hash + Eq`: delegates to `counted.find(key)` which increments the per-entry refcount upon success.
   - `insert(&mut self, key: K, value: V) -> Result<Ref, InsertError>`: on success, increments the Rc strong count (per-entry) and returns the new `Ref` (unique keys enforced in Module 1).
   - `len(&self) -> usize; is_empty(&self) -> bool` (delegates to Module 2).
-  - `value<'a>(&'a self, r: &'a Ref) -> Option<&'a V>`; `value_mut<'a>(&'a self, r: &'a Ref) -> Option<&'a mut V>`; `key<'a>(&'a self, r: &'a Ref) -> Option<&'a K>`.
-    - Accessors validate that `r.owner` matches this map’s `Inner` pointer; on mismatch, they return `None`.
-  - Returned references are tied to both the map borrow and the `Ref` lifetime.
+  - Access is Ref-centric: methods live on `Ref` and require a map borrow for owner checking.
+    - `impl Ref { fn key<'a>(&'a self, map: &'a RcHashMap<..>) -> Result<&'a K, WrongMap>; fn value<'a>(&'a self, map: &'a RcHashMap<..>) -> Result<&'a V, WrongMap>; fn value_mut<'a>(&'a self, map: &'a mut RcHashMap<..>) -> Result<&'a mut V, WrongMap> }`
+    - Accessors validate that `self.owner` matches this map’s `Inner` pointer; on mismatch, they return `Err(WrongMap)`.
+  - Returned references are tied to both the map borrow and the `Ref` lifetime. All `value_mut` methods require `&mut self` on the map to guarantee uniqueness during mutation.
+  - Additional queries: `contains_key(&Q) -> bool` is provided; there is no `peek()` that returns `&V` without a `Ref`, to avoid dangling borrows if the last `Ref` is dropped while holding `&V`.
+  - Errors: `WrongMap` is a zero-sized error type indicating an owner mismatch. All `Ref` accessors return `Result<_, WrongMap>`.
+  - Iteration:
+    - `iter(&self) -> impl Iterator<Item = (Ref<K,V,S>, &K, &V)>` (creates a `Ref` per entry).
+    - `iter_mut(&mut self) -> impl Iterator<Item = (Ref<K,V,S>, &K, &mut V)>`.
 
 Correctness and footguns
 - The only user code that can run while the structure is not yet consistent is `K: Hash` and `K: Eq` during probing. These must not reenter the map or cause observable aliasing.
-- Final removal order: remove from index → remove from storage and obtain `(K, V)` → decrement per-entry Rc strong count via `Rc::decrement_strong_count(raw_rc)` → then drop `K` and `V`.
-- Dropping `K`/`V` may execute user code after `Inner` has been freed (if this was the last entry and the map was already dropped); this is safe because the data structure is no longer referenced.
+- Final removal order: remove from index → remove from storage and obtain `(K, V)` → decrement per-entry Rc strong count via `Rc::decrement_strong_count(raw_rc)` → then drop `K` and `V`. See rationale under Keepalive model.
+- Because removal happens only on the last `Ref` for that entry, no other `Ref` to the entry exists. If other entries still have `Ref`s, their per-entry strong counts keep `Inner` alive across this decrement.
 - Single-threaded only; both `RcHashMap` and `Ref` are `!Send + !Sync`.
 
 Code sketch
@@ -139,11 +167,17 @@ impl<K, V, S> RcHashMap<K, V, S> {
     fn get<Q>(&self, q: &Q) -> Option<Ref<K,V,S>> where K: Borrow<Q>, Q: ?Sized + Hash + Eq {
         self.inner.counted.find(q).map(|slot| Ref { /* … */ })
     }
+    fn contains_key<Q>(&self, q: &Q) -> bool where K: Borrow<Q>, Q: ?Sized + Hash + Eq {
+        self.inner.counted.contains_key(q)
+    }
     fn len(&self) -> usize { self.inner.counted.len() }
     fn is_empty(&self) -> bool { self.len() == 0 }
 }
 
 impl<K, V, S> Ref<K, V, S> {
+    fn key<'a>(&'a self, map: &'a RcHashMap<K,V,S>) -> Result<&'a K, WrongMap> { /* owner check, then read */ }
+    fn value<'a>(&'a self, map: &'a RcHashMap<K,V,S>) -> Result<&'a V, WrongMap> { /* owner check, then read */ }
+    fn value_mut<'a>(&'a self, map: &'a mut RcHashMap<K,V,S>) -> Result<&'a mut V, WrongMap> { /* owner check, then write */ }
     fn drop(&mut self) {
         match unsafe { self.owner.as_ref() }.counted.put(self.slot) {
             PutResult::Live => {}
@@ -173,14 +207,18 @@ Testing plan
   - `Ref::clone` increments per-entry count; `Ref::drop` decrements and removes at zero.
   - Rc-based keepalive: map drop with live entries leaves `Inner` alive via per-entry strong counts; final removal of last entry frees `Inner`.
   - Removal path decrements per-entry strong count before dropping `K`/`V`.
-- Owner identity: wrong-map `Ref` rejected by accessors via owner-pointer check; `Eq`/`Hash` include `(owner_ptr, slot)`.
+- Owner identity and staleness: wrong-map `Ref` is rejected by accessors via owner-pointer check and returns `Err(WrongMap)`; `Eq`/`Hash` include `(owner_ptr, slot)`. Reference counting prevents stale `Ref`s: an entry cannot be physically removed (and its slot reused) while any `Ref` to it exists; we do not rely on SlotMap generations for `Ref` validity.
   - Unique keys enforced: `insert` fails on duplicate.
   - `len`/`is_empty` proxy to Module 2 and stay consistent across insert/get/put sequences.
 
 Notes and non-goals
 - Still single-threaded; no Send/Sync.
 - No weak handles (can be added later).
+- No explicit `clear()`, `remove()` or `drain()` on RcHashMap; entries are removed only when the last `Ref` is dropped to preserve refcount semantics.
 - Unique-keys policy enforced in Module 1: `insert` fails on duplicate; RcHashMap relies on this behavior.
 
 Overflow semantics
-- We assume practical refcount overflow is unrealistic; nonetheless, all increments are checked and `Ref::clone`/`get`/iterator cloning will panic on overflow rather than wrap or UB. `try_inc` is removed; use `inc` which panics on overflow.
+- We assume practical refcount overflow is unrealistic; overflow of reference counts is considered undefined behavior, consistent with `Rc` semantics. We document the assumption that there will be fewer than `usize::MAX` references to any entry. No runtime overflow checks are performed.
+
+Hasher and rehashing invariants
+- We precompute and store a `u64` hash per entry and always use the stored hash for indexing and rehash/growth; we do not call `K: Hash` after insertion. This avoids invoking user code during rehash.
