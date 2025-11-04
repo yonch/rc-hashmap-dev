@@ -30,7 +30,7 @@ Module 1: IndexedSlotMap
   - remove(&mut self, slot: DefaultKey) -> Option<(K, V)>
   - len(&self) -> usize; is_empty(&self) -> bool
   - iter(&self) -> impl Iterator<Item = (DefaultKey, &K, &V)>
-  - iter_mut(&mut self) -> impl Iterator<Item = ItemGuardMut<'_, K, V>>
+  - iter_mut(&mut self) -> impl Iterator<Item = (DefaultKey, &K, &mut V)>
     - Before yielding each item, increments the entry's refcount. Yields an RAII guard that:
       - exposes `slot() -> DefaultKey`, `key() -> &K`, `value_mut() -> &mut V` (and `DerefMut<Target = V>`),
       - on Drop, calls `put(slot)` to release the increment.
@@ -70,7 +70,7 @@ Module 2: CountedIndexedSlotMap
       - exposes `slot() -> DefaultKey`, `key() -> &K`, `value() -> &V` (and `Deref<Target = V>`),
       - on Drop, calls `put(slot)` to release the increment.
     - This ensures `put` is balanced correctly and never runs while `&K`/`&V` are still borrowed.
-  - iter_mut(&mut self) -> impl Iterator<Item = (DefaultKey, &K, &mut V)>
+  - iter_mut(&mut self) -> impl Iterator<Item = ItemGuardMut<'_, K, V>>
 - Notes
   - Unique-key policy is enforced in Module 1 and reused here unchanged; refcounting is orthogonal.
   - All increments/decrements are interior-mutable and single-threaded.
