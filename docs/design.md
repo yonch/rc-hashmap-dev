@@ -1,11 +1,11 @@
-RcHashMap: Single-threaded, handle-based map layered over a HandleHashMap
+RcHashMap: Single-threaded, handle-based map with Rc-like references to entries that allow fast access and cleanup on drop
 
 Summary
 - Goal: Build RcHashMap in safe, verifiable layers so we can reason about each piece independently.
 - Layers:
-  - HandleHashMap<K, V, S>: raw index + slot storage with unique-key enforcement; no refcounting.
-  - CountedHashMap<K, V, S>: wraps HandleHashMap and adds per-entry refcounting (increments on get/clone, decrements on put). This layer has no knowledge of higher-level handles.
-  - RcHashMap<K, V, S>: public API with `Ref` backed by `Rc<Inner>`; keepalive is implemented via `Rc` strong counts (one per map + one per live entry). `Ref`s are defined only here and delegate to CountedHashMap.
+  - HandleHashMap<K, V, S>: A HashMap like datastructure that provides handles for quick access to internal entries without hashing.
+  - CountedHashMap<K, V, S>: wraps HandleHashMap and adds per-entry refcounting (increments on get/clone, decrements on put).
+  - RcHashMap<K, V, S>: wraps HandleHashMap and adds a `Ref` handle, which frees the reference when dropped.
 - Constraints: single-threaded, no atomics, no per-entry heap allocations, stable generational keys, O(1) average lookups, unique keys.
 
 Why this split?
@@ -14,7 +14,7 @@ Why this split?
 - Clear failure boundaries: HandleHashMap never calls into user code once the data structure is in a consistent state.
 
 Module 1: HandleHashMap
-- Purpose: Combine hashbrown::raw::RawTable as an index with slotmap::SlotMap as storage. No refcounts; unique keys are enforced at this layer.
+- How: Combine hashbrown::raw::RawTable as an index with slotmap::SlotMap as storage. Handles are slotmap "keys" and provide efficient access to the entries.
 - Entry<K, V>
   - key: K — user key; used for Eq/Hash only.
   - value: V — stored inline.
