@@ -3,84 +3,116 @@ RcHashMap: Single-threaded, handle-based map with Rc-like references to entries 
 Summary
 - Goal: Build RcHashMap in safe, verifiable layers so we can reason about each piece independently.
 - Layers:
-  - HandleHashMap<K, V, S>: A HashMap like datastructure that provides handles for quick access to internal entries without hashing.
+  - HandleHashMap<K, V, S>: A HashMap like datastructure that provides handles for quick access to internal entries without hashing. Returns a lightweight `Handle` wrapper internally backed by a `DefaultKey`.
   - CountedHashMap<K, V, S>: wraps HandleHashMap and adds per-entry refcounting (increments on get/clone, decrements on put).
   - RcHashMap<K, V, S>: wraps HandleHashMap and adds a `Ref` handle, which frees the reference when dropped.
 - Constraints: single-threaded, no atomics, no per-entry heap allocations, stable generational keys, O(1) average lookups, unique keys.
 
 Why this split?
 - Localize invariants: each layer has a small, precise contract. We can test and audit them separately.
-- Keep unsafe to a minimum: raw-pointer identity checks exist only in RcHashMap; pure indexing logic is safe Rust.
+- Keep unsafe to a minimum: raw-pointer handling is isolated in a small `ManualRc<T>` helper used by RcHashMap; pure indexing logic is safe Rust.
 - Clear failure boundaries: HandleHashMap never calls into user code once the data structure is in a consistent state.
 
 Module 1: HandleHashMap
-- How: Combine hashbrown::raw::RawTable as an index with slotmap::SlotMap as storage. Handles are slotmap "keys" and provide efficient access to the entries.
+- How: Combine hashbrown::raw::RawTable as an index with slotmap::SlotMap as storage. `Handle` is a small wrapper around the slotmap `DefaultKey` and provides efficient access to the entries.
 - Entry<K, V>
   - key: K — user key; used for Eq/Hash only.
   - value: V — stored inline.
   - hash: u64 — precomputed with the map’s BuildHasher.
 - API (sketch)
   - new(hasher: S) -> Self
-  - find(&self, key: &K) -> Option<DefaultKey>
+  - find(&self, key: &K) -> Option<Handle>
   - contains_key<Q>(&self, q: &Q) -> bool where K: Borrow<Q>, Q: ?Sized + Hash + Eq
-  - insert(&mut self, key: K, value: V) -> Result<DefaultKey, InsertError>
-  - key(&self, slot: DefaultKey) -> Option<&K>
-  - value(&self, slot: DefaultKey) -> Option<&V>
-  - value_mut(&mut self, slot: DefaultKey) -> Option<&mut V>
-  - remove(&mut self, slot: DefaultKey) -> Option<(K, V)>
+  - insert(&mut self, key: K, value: V) -> Result<Handle, InsertError>
+  - remove(&mut self, handle: Handle) -> Option<(K, V)>
   - len(&self) -> usize; is_empty(&self) -> bool
-  - iter(&self) -> impl Iterator<Item = (DefaultKey, &K, &V)>
-  - iter_mut(&mut self) -> impl Iterator<Item = (DefaultKey, &K, &mut V)>
+  - iter(&self) -> impl Iterator<Item = (Handle, &K, &V)>
+  - iter_mut(&mut self) -> impl Iterator<Item = (Handle, &K, &mut V)>
+  - `Handle` methods (tie lifetimes via a map borrow):
+    - Handle::key<'a, K, V, S>(&'a self, map: &'a HandleHashMap<K, V, S>) -> Option<&'a K>
+    - Handle::value<'a, K, V, S>(&'a self, map: &'a HandleHashMap<K, V, S>) -> Option<&'a V>
+    - Handle::value_mut<'a, K, V, S>(&'a self, map: &'a mut HandleHashMap<K, V, S>) -> Option<&'a mut V>
 - Behavior
-  - Indexing: store only DefaultKey in RawTable, keyed by hash; resolve collisions with K: Eq against entries[slot].key.
+  - Indexing: store only `DefaultKey` in RawTable, keyed by hash; resolve collisions with K: Eq against entries[slot].key. The public API returns a `Handle` that wraps this internal key.
   - Insertion (two-phase): compute hash(key), probe index (Eq) to reject duplicates, reserve capacity in index and storage; then commit by inserting into storage to obtain a slot and linking the slot into the index under the stored hash. On failure, roll back so the map remains unchanged.
-  - Lookup: compute hash(key), probe index, compare by Eq.
-  - Removal: remove from index first, then remove the slot from entries and return (K, V).
+  - Lookup: compute hash(key), probe index, compare by Eq. Returns a `Handle`.
+  - Removal: remove from index first, then remove the handle's slot from entries and return (K, V).
 - Safety and consistency
-  - remove() guarantees the data structure is consistent (index and storage no longer reference the slot) before dropping K and V.
+  - remove() guarantees the data structure is consistent (index and storage no longer reference the handle’s slot) before dropping K and V.
   - All public methods leave the data structure in a consistent state before any user code can run, except K: Hash and K: Eq that are invoked during probing. We document this as a footgun for higher layers: if Eq/Hash have side-effects, they must not reenter this map.
   - No refcounting or keepalive here; purely structural.
 
 Module 2: CountedHashMap
-- Purpose: Add simple reference counting on top of HandleHashMap (not for keepalive, and not aware of higher-level handle types).
+- Purpose: Add simple reference counting on top of HandleHashMap. Reuses the same `Handle` type and adds explicit counting operations.
 - Representation
   - Wrap values as Counted<V> = { refcount: Cell<usize>, value: V }.
   - Internally: HandleHashMap<K, Counted<V>, S>.
 - API (same surface, plus helpers)
-  - find(&self, key: &K) -> Option<DefaultKey>
-    - If found, increments refcount and returns the slot. Uses interior mutability for the count.
-  - insert(&mut self, key: K, value: V) -> Result<DefaultKey, InsertError>
-    - Delegates to HandleHashMap’s unique insertion. On success, initializes refcount = 1 and returns the slot.
-  - value(&self, slot: DefaultKey) -> Option<&V>
-  - value_mut(&mut self, slot: DefaultKey) -> Option<&mut V>
-  - key(&self, slot: DefaultKey) -> Option<&K>
+  - find(&self, key: &K) -> Option<Handle>
+    - If found, increments refcount and returns a `Handle`. Uses interior mutability for the count.
+  - insert(&mut self, key: K, value: V) -> Result<Handle, InsertError>
+    - Delegates to HandleHashMap’s unique insertion. On success, initializes refcount = 1 and returns a `Handle`.
   - contains_key<Q>(&self, q: &Q) -> bool where K: Borrow<Q>, Q: ?Sized + Hash + Eq
     - Probes using the index without incrementing refcounts.
-  - put(&self, slot: DefaultKey) -> PutResult
-    - Decrements refcount; if it reaches 0, removes the slot from the underlying HandleHashMap and returns `PutResult::Removed { key: K, value: V }`. Otherwise returns `PutResult::Live`.
-  - inc(&self, slot: DefaultKey)
-    - Increments for cloning/duplication of a slot reference; overflow is unchecked (UB), consistent with `Rc`; panics on invalid slot in debug builds.
+  - put(&self, handle: Handle) -> PutResult
+    - Decrements refcount; if it reaches 0, removes the handle's slot from the underlying HandleHashMap and returns `PutResult::Removed { key: K, value: V }`. Otherwise returns `PutResult::Live`.
+  - get(&self, handle: Handle)
+    - Increments for cloning/duplication of a handle reference; overflow is unchecked (UB), consistent with `Rc`; panics on invalid handle in debug builds.
   - len(&self) -> usize; is_empty(&self) -> bool
   - iter(&self) -> impl Iterator<Item = ItemGuard<'_, K, V>>
     - Before yielding each item, increments the entry's refcount. Yields an RAII guard that:
-      - exposes `slot() -> DefaultKey`, `key() -> &K`, `value() -> &V` (and `Deref<Target = V>`),
-      - on Drop, calls `put(slot)` to release the increment.
+      - exposes `handle() -> Handle`, `key() -> &K`, `value() -> &V` (and `Deref<Target = V>`),
+      - on Drop, calls `put(handle)` to release the increment.
     - This ensures `put` is balanced correctly and never runs while `&K`/`&V` are still borrowed.
   - iter_mut(&mut self) -> impl Iterator<Item = ItemGuardMut<'_, K, V>>
     - Before yielding each item, increments the entry's refcount. Yields an RAII guard that:
-      - exposes `slot() -> DefaultKey`, `key() -> &K`, `value_mut() -> &mut V` (and `DerefMut<Target = V>`),
-      - on Drop, calls `put(slot)` to release the increment.
+      - exposes `handle() -> Handle`, `key() -> &K`, `value_mut() -> &mut V` (and `DerefMut<Target = V>`),
+      - on Drop, calls `put(handle)` to release the increment.
     - Using a guard keeps semantics parallel to Module 3 (where `Ref` acts as the guard) and ensures refcount is balanced even on early loop exit.  
   - Notes
   - Unique-key policy is enforced in Module 1 and reused here unchanged; refcounting is orthogonal.
   - All increments/decrements are interior-mutable and single-threaded.
-  - The underlying HandleHashMap remains consistent at all times; drops of K and V happen only after the slot is removed from both index and storage.
+  - The underlying HandleHashMap remains consistent at all times; drops of K and V happen only after the handle's slot is removed from both index and storage.
+
+ManualRc: Raw Rc keeper
+
+- Purpose: Encapsulate the use of the raw `Rc` pointer and the calls to `Rc::increment_strong_count` / `Rc::decrement_strong_count` behind a tiny helper that also holds a `Weak<T>` so we can reason about safety (allocation liveness) separately from the per-entry refcount protocol.
+- Construction: `ManualRc::new(&Rc<T>)` clones the `Rc`, calls `Rc::into_raw` to obtain a pointer suitable for `increment_strong_count`/`decrement_strong_count`, stores that pointer, and immediately drops the temporary clone by calling `Rc::decrement_strong_count(ptr)`. It also stores a `Weak<T>` derived from the same `Rc` with `Rc::downgrade(&rc)`.
+- API:
+  - `fn get(&self)` — increments the strong count via the stored raw pointer; this is used when an entry becomes (or remains) live (e.g., insert or successful `get`).
+  - `fn put(&self)` — decrements the strong count; this is used on final removal after `(K, V)` have been dropped.
+  - `fn as_ptr(&self) -> *const T` — exposes the raw pointer for identity checks where needed (e.g., `Ref` owner equality).
+- Invariants and checks:
+  - The stored pointer originates from `Rc::into_raw` on an `Rc<T>` referencing the same allocation as the stored `Weak<T>`; we never derive the pointer from `Weak::as_ptr`.
+  - `get()`/`put()` do not upgrade the `Weak`; they rely on the map’s protocol to only call them while the allocation is alive. For debug builds we may assert `self.weak.strong_count() > 0` before `get()`.
+  - `ManualRc<T>` is `!Send + !Sync` (like `Rc<T>`). It does not own a strong count.
+
+Sketch:
+
+```
+struct ManualRc<T> {
+    ptr: *const T,
+    weak: std::rc::Weak<T>,
+    _nosend: std::marker::PhantomData<*mut ()>,
+}
+impl<T> ManualRc<T> {
+    fn new(rc: &std::rc::Rc<T>) -> Self {
+        let weak = std::rc::Rc::downgrade(rc);
+        let raw = std::rc::Rc::into_raw(rc.clone());
+        unsafe { std::rc::Rc::decrement_strong_count(raw) }; // drop the temporary clone
+        Self { ptr: raw, weak, _nosend: std::marker::PhantomData }
+    }
+    fn get(&self) { debug_assert!(self.weak.strong_count() > 0); unsafe { std::rc::Rc::increment_strong_count(self.ptr) } }
+    fn put(&self) { unsafe { std::rc::Rc::decrement_strong_count(self.ptr) } }
+    fn as_ptr(&self) -> *const T { self.ptr }
+}
+```
 
 Module 3: RcHashMap
 - Purpose: Public, ergonomic API with `Ref` handles, Rc-based keepalive, and owner identity checks. Internally holds `Rc<Inner>`.
 - Keepalive model (via Rc strong counts)
-  - RcHashMap holds `Rc<Inner>`. `Inner` also stores a raw pointer `raw_rc: *const Inner` that is obtained via `Rc::into_raw` on a temporary clone of the `Rc<Inner>`. Immediately after storing this pointer, we call `Rc::decrement_strong_count(raw_rc)` to release the clone, so the baseline strong count remains one (owned by the map). This satisfies the safety preconditions of `increment_strong_count/decrement_strong_count` (pointer obtained via `into_raw`) without holding an extra count.
-  - Each live entry contributes one additional strong count: on successful insertion, call `Rc::increment_strong_count(raw_rc)`; on final removal (when the entry’s `refcount` reaches 0 and the slot is removed), call `Rc::decrement_strong_count(raw_rc)`.
+  - `Inner` holds a `ManualRc<Inner>` keeper created from the map’s `Rc<Inner>` at construction time (e.g., via `Rc::new_cyclic`). The keeper owns no strong count; it only stores the raw pointer and a `Weak` for reasoning/debug assertions.
+  - Each live entry contributes one additional strong count: on successful insertion, call `keeper.get()`; on final removal (when the entry’s `refcount` reaches 0 and the slot is removed), call `keeper.put()`.
   - Dropping RcHashMap drops its own `Rc` handle; if entries still exist, their per-entry strong counts keep `Inner` alive until those entries are removed.
   - Final removal order and rationale: drop `K` and `V` first while `Inner` remains alive (kept by the per-entry strong count), then decrement the per-entry strong count. This preserves safety if user `Drop` for `K`/`V` reenters the map.
   - Length as an invariant aid: all three layers expose `len()`/`is_empty()`. Although Rc-based keepalive does not require checking `len()==0` to trigger deallocation, `len()==0` on `CountedHashMap` precisely indicates “no live entries remain”, which is useful for assertions and tests around last-entry removal.
@@ -89,14 +121,14 @@ Module 3: RcHashMap
     - Instead, we implement the same semantics at lower cost:
       - Entry liveness is tracked by a per-entry `usize` refcount in `CountedHashMap`. Cloning/dropping `Ref` only touches this counter.
       - Map keepalive is centralized: each live entry contributes exactly one extra `Rc<Inner>` strong count for the entire duration the entry is live (i.e., while its per-entry refcount is ≥ 1). We increment this strong count once on insertion (transition to live), and we decrement it once at final removal (transition to dead). Cloning additional `Ref`s to the same entry does not touch the map’s strong count.
-      - We avoid storing an `Rc` inside each entry. `Inner` holds a self-pointer (`raw_rc`) obtained via `Rc::into_raw` on a temporary clone. We use `Rc::increment_strong_count(raw_rc)` / `Rc::decrement_strong_count(raw_rc)` to manage the per-entry keepalive for the map without extra allocations or pointer fields per entry.
+      - We avoid storing an `Rc` inside each entry. `Inner` holds a `ManualRc<Inner>` that exposes `get()`/`put()` to manage the per-entry keepalive without extra per-entry allocations or pointer fields.
     - The net effect matches the intuitive model: a `Ref` prevents its entry from being removed, and as long as any entry is live, the map’s `Inner` remains alive. We achieve this without embedding `Rc` in each entry or per-`Ref` heap work.
 - Unique keys policy
   - RcHashMap enforces unique keys by delegating to Module 1’s unique insertion. `insert` fails if the key already exists (no modification).
 - Ref
   - Fields: `{ slot: DefaultKey, owner: NonNull<Inner<…>>, _nosend: PhantomData<*mut ()> }`.
-  - Clone: `impl Clone for Ref` increments per-entry count via `inc`; overflow is unchecked (UB) to match `Rc`.
-  - Drop: decrements per-entry count via `put`; if it reaches 0, performs physical removal. Removal path drops `K`/`V` first and then calls `Rc::decrement_strong_count(raw_rc)`.
+  - Clone: `impl Clone for Ref` increments per-entry count via `get`; overflow is unchecked (UB) to match `Rc`.
+  - Drop: decrements per-entry count via `put`; if it reaches 0, performs physical removal. Removal path drops `K`/`V` first and then calls `keeper.put()`.
   - Hash/Eq: `(owner_ptr, slot)`.
   - Accessors
   - `get<Q>(&self, key: &Q) -> Option<Ref>` where `K: Borrow<Q>, Q: Hash + Eq`: delegates to `counted.find(key)` which increments the per-entry refcount upon success.
@@ -120,7 +152,7 @@ Module 3: RcHashMap
 
 Correctness and footguns
 - The only user code that can run while the structure is not yet consistent is `K: Hash` and `K: Eq` during probing. These must not reenter the map or cause observable aliasing.
-- Final removal order: remove from index → remove from storage and obtain `(K, V)` → drop `K` and `V` → then decrement the per-entry Rc strong count via `Rc::decrement_strong_count(raw_rc)`. See rationale under Keepalive model.
+- Final removal order: remove from index → remove from storage and obtain `(K, V)` → drop `K` and `V` → then call `keeper.put()` to decrement the per-entry Rc strong count. See rationale under Keepalive model.
 - Because removal happens only on the last handle for that entry, no other `Ref` to the entry exists. If other entries still have `Ref`s, their per-entry strong counts keep `Inner` alive across this decrement.
 - Single-threaded only; both `RcHashMap` and `Ref` are `!Send + !Sync` (enforced with `PhantomData<*mut ()>` on `Ref`).
 
@@ -128,50 +160,56 @@ Code sketch
 ```rust
 // HandleHashMap
 struct HandleHashMap<K, V, S> { /* entries: SlotMap<DefaultKey, Entry<K,V>>, index: RawTable<DefaultKey>, hasher: S */ }
+struct Handle(DefaultKey);
 impl<K: Eq + Hash, V, S: BuildHasher> HandleHashMap<K, V, S> {
-    fn find<Q: ?Sized + Hash + Eq>(&self, q: &Q) -> Option<DefaultKey> where K: Borrow<Q> { /* probe */ }
-    fn insert(&mut self, k: K, v: V) -> Result<DefaultKey, InsertError> { /* two-phase commit with rollback on failure */ }
-    fn value(&self, s: DefaultKey) -> Option<&V> { /* read */ }
-    fn value_mut(&mut self, s: DefaultKey) -> Option<&mut V> { /* write */ }
-    fn key(&self, s: DefaultKey) -> Option<&K> { /* read */ }
-    fn remove(&mut self, s: DefaultKey) -> Option<(K,V)> { /* index first, then entries */ }
-    fn len(&self) -> usize { /* number of stored slots */ }
+    fn find<Q: ?Sized + Hash + Eq>(&self, q: &Q) -> Option<Handle> where K: Borrow<Q> { /* probe, wrap DefaultKey */ }
+    fn insert(&mut self, k: K, v: V) -> Result<Handle, InsertError> { /* two-phase commit with rollback on failure; wrap DefaultKey */ }
+    fn remove(&mut self, h: Handle) -> Option<(K,V)> { /* index first, then entries */ }
+    fn len(&self) -> usize { /* number of stored entries */ }
     fn is_empty(&self) -> bool { self.len() == 0 }
+}
+impl Handle {
+    fn key<'a, K, V, S>(&'a self, map: &'a HandleHashMap<K, V, S>) -> Option<&'a K> { /* read */ }
+    fn value<'a, K, V, S>(&'a self, map: &'a HandleHashMap<K, V, S>) -> Option<&'a V> { /* read */ }
+    fn value_mut<'a, K, V, S>(&'a self, map: &'a mut HandleHashMap<K, V, S>) -> Option<&'a mut V> { /* write */ }
 }
 
 // CountedHashMap
 struct CountedHashMap<K, V, S>(HandleHashMap<K, Counted<V>, S>);
 struct Counted<V> { refcount: Cell<usize>, value: V }
 impl<K: Eq + Hash, V, S: BuildHasher> CountedHashMap<K, V, S> {
-    fn find<Q: ?Sized + Hash + Eq>(&self, q: &Q) -> Option<DefaultKey> where K: Borrow<Q> { /* inc on hit */ }
-    fn insert(&mut self, k: K, v: V) -> Result<DefaultKey, InsertError> { /* refcount=1; fail on dup */ }
-    fn inc(&self, s: DefaultKey) { /* inc for cloning; unchecked overflow (UB) */ }
-    fn put(&self, s: DefaultKey) -> PutResult { /* dec; remove and return K,V at zero */ }
-    fn value(&self, s: DefaultKey) -> Option<&V> { /* read */ }
-    fn value_mut(&mut self, s: DefaultKey) -> Option<&mut V> { /* write */ }
-    fn key(&self, s: DefaultKey) -> Option<&K> { /* read */ }
-    fn len(&self) -> usize { /* number of stored/live slots (refcount >= 1) */ }
+    fn find<Q: ?Sized + Hash + Eq>(&self, q: &Q) -> Option<Handle> where K: Borrow<Q> { /* inc on hit */ }
+    fn insert(&mut self, k: K, v: V) -> Result<Handle, InsertError> { /* refcount=1; fail on dup */ }
+    fn get(&self, h: Handle) { /* inc for cloning; unchecked overflow (UB) */ }
+    fn put(&self, h: Handle) -> PutResult { /* dec; remove and return K,V at zero */ }
+    fn len(&self) -> usize { /* number of stored/live entries (refcount >= 1) */ }
     fn is_empty(&self) -> bool { self.len() == 0 }
 }
 
 // RcHashMap (public)
-struct RcHashMap<K, V, S> { inner: Rc<Inner<K,V,S>> }
+struct RcHashMap<K, V, S> {
+    inner: std::rc::Rc<Inner<K,V,S>>,
+}
 struct Inner<K, V, S> {
     counted: CountedHashMap<K, V, S>,
-    raw_rc: *const Inner<K,V,S>,
+    keeper: ManualRc<Inner<K,V,S>>,
     // plus interior mutability guards/markers to keep !Send + !Sync
 }
-struct Ref<K, V, S> { slot: DefaultKey, owner: NonNull<Inner<K,V,S>>, _nosend: PhantomData<*mut ()> }
+struct Ref<K, V, S> {
+    slot: DefaultKey,
+    owner: NonNull<Inner<K,V,S>>,
+    _nosend: PhantomData<*mut ()>,
+}
 
 impl<K, V, S> RcHashMap<K, V, S> {
     fn insert(&mut self, k: K, v: V) -> Result<Ref<K,V,S>, InsertError> {
-        let slot = self.inner.counted.insert(k, v)?;
+        let handle = self.inner.counted.insert(k, v)?;
         // Entry live: bump per-entry strong count
-        unsafe { Rc::increment_strong_count(self.inner.raw_rc) }
-        Ok(Ref { /* … */ })
+        self.inner.keeper.get();
+        Ok(Ref { /* use handle's internal key … */ owner: /* NonNull::from(self.inner.as_ref()) */, _nosend: PhantomData })
     }
     fn get<Q>(&self, q: &Q) -> Option<Ref<K,V,S>> where K: Borrow<Q>, Q: ?Sized + Hash + Eq {
-        self.inner.counted.find(q).map(|slot| Ref { /* … */ })
+        self.inner.counted.find(q).map(|handle| Ref { /* … compute owner from &self.inner */ })
     }
     fn contains_key<Q>(&self, q: &Q) -> bool where K: Borrow<Q>, Q: ?Sized + Hash + Eq {
         self.inner.counted.contains_key(q)
@@ -186,12 +224,13 @@ impl<K, V, S> Ref<K, V, S> {
     fn value<'a>(&'a self, map: &'a RcHashMap<K,V,S>) -> Result<&'a V, WrongMap> { /* owner check, then read */ }
     fn value_mut<'a>(&'a self, map: &'a mut RcHashMap<K,V,S>) -> Result<&'a mut V, WrongMap> { /* owner check, then write */ }
     fn drop(&mut self) {
-        match unsafe { self.owner.as_ref() }.counted.put(self.slot) {
+        match unsafe { self.owner.as_ref() }.counted.put(/* Handle(self.slot) */) {
             PutResult::Live => {}
             PutResult::Removed { key, value } => {
-                let inner = unsafe { self.owner.as_ref() };
+                let _inner = unsafe { self.owner.as_ref() };
                 drop(key); drop(value);
-                unsafe { Rc::decrement_strong_count(inner.raw_rc) };
+                // Final removal: drop the per-entry strong count via owner's keeper.
+                unsafe { self.owner.as_ref() }.keeper.put();
             }
         }
     }
@@ -207,7 +246,7 @@ Testing plan
 - CountedHashMap
   - `find` increments; `put` decrements; actual removal only at zero.
   - Overflow behavior for refcount increments is unchecked (UB), consistent with `Rc`.
-  - value/value_mut observe the same slot identity across increments.
+  - value/value_mut observe the same handle identity across increments.
   - `len`/`is_empty` reflect the number of live entries (refcount >= 1); removal at zero decreases `len`.
 - RcHashMap
   - `Ref::clone` increments per-entry count; `Ref::drop` decrements and removes at zero.
