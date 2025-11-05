@@ -1,6 +1,6 @@
 //! CountedHashMap: per-entry reference counting atop HandleHashMap.
 
-use crate::tokens::UsizeCount;
+use crate::tokens::{Count, Token, UsizeCount};
 use crate::util_handle_map::{Handle, HandleHashMap, InsertError};
 
 #[derive(Debug)]
@@ -29,21 +29,6 @@ where
     pub fn new() -> Self {
         Self {
             inner: HandleHashMap::new(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn duplicate_insert_rejected() {
-        let mut m: CountedHashMap<String, i32> = CountedHashMap::new();
-        let _ = m.insert("dup".to_string(), 1).unwrap();
-        match m.insert("dup".to_string(), 2) {
-            Err(InsertError::DuplicateKey) => {}
-            other => panic!("unexpected result: {:?}", other),
         }
     }
 }
@@ -90,21 +75,39 @@ where
         self.inner.insert(key, Counted::new(value, 0))
     }
 
-    /// Increment per-entry refcount; returns new count.
-    pub fn inc(&self, h: Handle) -> Option<usize> {
+    /// Increment per-entry refcount using the token API.
+    /// The returned value is unused by callers; return `Some(())` on success.
+    pub fn inc(&self, h: Handle) -> Option<()> {
         let c = self.inner.handle_value(h)?;
-        // Perform raw increment mirroring Rc semantics.
-        Some(c.refcount.inc_raw())
+        let t = c.refcount.get();
+        core::mem::forget(t);
+        Some(())
     }
 
-    /// Decrement per-entry refcount; returns true if now zero.
+    /// Decrement per-entry refcount using the token API; returns true if now zero.
     pub fn dec(&self, h: Handle) -> Option<bool> {
         let c = self.inner.handle_value(h)?;
-        Some(c.refcount.dec_raw() == 0)
+        // Consume a synthetic token to balance a previous `get`.
+        Some(c.refcount.put(Token::new()))
     }
 
     /// Physically remove the entry corresponding to the handle; returns (K, V).
     pub fn remove(&mut self, h: Handle) -> Option<(K, V)> {
         self.inner.remove(h).map(|(k, c)| (k, c.value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_insert_rejected() {
+        let mut m: CountedHashMap<String, i32> = CountedHashMap::new();
+        let _ = m.insert("dup".to_string(), 1).unwrap();
+        match m.insert("dup".to_string(), 2) {
+            Err(InsertError::DuplicateKey) => {}
+            other => panic!("unexpected result: {:?}", other),
+        }
     }
 }
