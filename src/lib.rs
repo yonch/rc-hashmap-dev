@@ -17,6 +17,7 @@ mod reentrancy;
 mod tokens;
 mod util_counted_map;
 mod util_handle_map;
+mod util_handle_map_prop;
 
 // Public surface
 pub use rc_map::{RcHashMap, Ref};

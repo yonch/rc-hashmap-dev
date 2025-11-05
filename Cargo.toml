@@ -18,6 +18,7 @@ hashbrown = { version = "0.14", features = ["raw"] }
 
 [dev-dependencies]
 criterion = "0.5"
+proptest = "1"
 
 [features]
 # Internal benchmarking hook: exposes HandleHashMap for benches only.
