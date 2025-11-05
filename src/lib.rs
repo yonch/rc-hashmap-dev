@@ -8,5 +8,7 @@
 //! the final Rc-backed map layer.
 
 mod manual_rc;
+mod reentrancy;
 
 pub use manual_rc::ManualRc;
+pub use reentrancy::{DebugReentrancy, ReentrancyGuard};
