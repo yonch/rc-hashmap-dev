@@ -13,4 +13,5 @@ documentation = "https://docs.rs/rc-hashmap"
 path = "src/lib.rs"
 
 [dependencies]
-
+slotmap = "1"
+hashbrown = { version = "0.14", features = ["raw"] }
