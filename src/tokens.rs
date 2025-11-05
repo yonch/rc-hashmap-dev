@@ -57,33 +57,6 @@ impl UsizeCount {
             count: Cell::new(initial),
         }
     }
-
-    #[inline]
-    pub fn get_raw(&self) -> usize {
-        self.count.get()
-    }
-
-    /// Increment without producing a token; for internal RAII handle mgmt.
-    #[inline]
-    pub fn inc_raw(&self) -> usize {
-        let c = self.count.get();
-        let n = c.wrapping_add(1);
-        self.count.set(n);
-        if n == 0 {
-            std::process::abort();
-        }
-        n
-    }
-
-    /// Decrement without consuming a token; for internal RAII handle mgmt.
-    #[inline]
-    pub fn dec_raw(&self) -> usize {
-        let c = self.count.get();
-        assert!(c > 0, "UsizeCount underflow");
-        let n = c - 1;
-        self.count.set(n);
-        n
-    }
 }
 
 impl Count for UsizeCount {
