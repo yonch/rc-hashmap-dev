@@ -11,7 +11,10 @@ pub struct Counted<V> {
 
 impl<V> Counted<V> {
     pub fn new(value: V, initial: usize) -> Self {
-        Self { refcount: UsizeCount::new(initial), value }
+        Self {
+            refcount: UsizeCount::new(initial),
+            value,
+        }
     }
 }
 
@@ -23,7 +26,11 @@ impl<K, V> CountedHashMap<K, V>
 where
     K: Eq + core::hash::Hash,
 {
-    pub fn new() -> Self { Self { inner: HandleHashMap::new() } }
+    pub fn new() -> Self {
+        Self {
+            inner: HandleHashMap::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -46,12 +53,22 @@ where
     K: Eq + core::hash::Hash,
     S: core::hash::BuildHasher + Clone + Default,
 {
-    pub fn with_hasher(hasher: S) -> Self { Self { inner: HandleHashMap::with_hasher(hasher) } }
+    pub fn with_hasher(hasher: S) -> Self {
+        Self {
+            inner: HandleHashMap::with_hasher(hasher),
+        }
+    }
 
-    pub fn len(&self) -> usize { self.inner.len() }
-    pub fn is_empty(&self) -> bool { self.inner.is_empty() }
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
 
-    pub fn find(&self, key: &K) -> Option<Handle> { self.inner.find(key) }
+    pub fn find(&self, key: &K) -> Option<Handle> {
+        self.inner.find(key)
+    }
 
     pub fn contains_key<Q>(&self, q: &Q) -> bool
     where
@@ -61,8 +78,12 @@ where
         self.inner.contains_key(q)
     }
 
-    pub fn get_value(&self, h: Handle) -> Option<&V> { self.inner.handle_value(h).map(|c| &c.value) }
-    pub fn get_value_mut(&mut self, h: Handle) -> Option<&mut V> { self.inner.handle_value_mut(h).map(|c| &mut c.value) }
+    pub fn get_value(&self, h: Handle) -> Option<&V> {
+        self.inner.handle_value(h).map(|c| &c.value)
+    }
+    pub fn get_value_mut(&mut self, h: Handle) -> Option<&mut V> {
+        self.inner.handle_value_mut(h).map(|c| &mut c.value)
+    }
 
     /// Insert a new key -> value with refcount initialized to 0.
     pub fn insert(&mut self, key: K, value: V) -> Result<Handle, InsertError> {

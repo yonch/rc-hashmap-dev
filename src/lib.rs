@@ -12,11 +12,11 @@
 //! The internal `RcCount<T>` helper (in `tokens`) encapsulates the
 //! raw-pointer based use of `std::rc::Rc` increment/decrement APIs.
 
+mod rc_map;
 mod reentrancy;
 mod tokens;
-mod util_handle_map;
 mod util_counted_map;
-mod rc_map;
+mod util_handle_map;
 
 // Public surface
 pub use rc_map::{RcHashMap, Ref};

@@ -17,7 +17,11 @@ where
     K: Eq + core::hash::Hash,
 {
     pub fn new() -> Self {
-        Self { inner: Rc::new(Inner { map: RefCell::new(CountedHashMap::new()) }) }
+        Self {
+            inner: Rc::new(Inner {
+                map: RefCell::new(CountedHashMap::new()),
+            }),
+        }
     }
 }
 
@@ -27,11 +31,19 @@ where
     S: core::hash::BuildHasher + Clone + Default,
 {
     pub fn with_hasher(hasher: S) -> Self {
-        Self { inner: Rc::new(Inner { map: RefCell::new(CountedHashMap::with_hasher(hasher)) }) }
+        Self {
+            inner: Rc::new(Inner {
+                map: RefCell::new(CountedHashMap::with_hasher(hasher)),
+            }),
+        }
     }
 
-    pub fn len(&self) -> usize { self.inner.map.borrow().len() }
-    pub fn is_empty(&self) -> bool { self.inner.map.borrow().is_empty() }
+    pub fn len(&self) -> usize {
+        self.inner.map.borrow().len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.inner.map.borrow().is_empty()
+    }
 
     pub fn contains_key<Q>(&self, q: &Q) -> bool
     where
@@ -62,7 +74,7 @@ where
     K: Eq + core::hash::Hash,
     S: core::hash::BuildHasher + Clone + Default,
 {
-    owner: Rc<Inner<K, V, S>>,    // keep owner alive
+    owner: Rc<Inner<K, V, S>>, // keep owner alive
     owner_ptr: *const Inner<K, V, S>,
     handle: Handle,
 }
@@ -74,10 +86,16 @@ where
 {
     fn new(owner: Rc<Inner<K, V, S>>, handle: Handle) -> Self {
         let owner_ptr = Rc::as_ptr(&owner);
-        Self { owner, owner_ptr, handle }
+        Self {
+            owner,
+            owner_ptr,
+            handle,
+        }
     }
 
-    pub fn handle(&self) -> Handle { self.handle }
+    pub fn handle(&self) -> Handle {
+        self.handle
+    }
 
     pub fn value(&self) -> Option<std::cell::Ref<'_, V>> {
         let borrow = self.owner.map.borrow();
@@ -102,7 +120,11 @@ where
     fn clone(&self) -> Self {
         // Increment per-entry count
         self.owner.map.borrow().inc(self.handle);
-        Self { owner: self.owner.clone(), owner_ptr: self.owner_ptr, handle: self.handle }
+        Self {
+            owner: self.owner.clone(),
+            owner_ptr: self.owner_ptr,
+            handle: self.handle,
+        }
     }
 }
 
@@ -137,7 +159,8 @@ impl<K, V, S> Eq for Ref<K, V, S>
 where
     K: Eq + core::hash::Hash,
     S: core::hash::BuildHasher + Clone + Default,
-{}
+{
+}
 
 impl<K, V, S> Hash for Ref<K, V, S>
 where
