@@ -136,22 +136,18 @@ where
     /// Return a token for an entry; removes and returns (K, V) when count hits zero.
     pub fn put(&mut self, h: CountedHandle<'_>) -> PutResult<K, V> {
         let CountedHandle { handle, token, .. } = h;
-        if let Some(entry) = self.inner.handle_value(handle) {
-            let now_zero = entry.refcount.put(token);
-            if now_zero {
-                let (k, v) = self
-                    .inner
-                    .remove(handle)
-                    .expect("entry must exist when count reaches zero");
-                return PutResult::Removed {
-                    key: k,
-                    value: v.value,
-                };
-            }
-            PutResult::Live
+        let entry = self
+            .inner
+            .handle_value(handle)
+            .expect("CountedHandle must refer to a live entry when returned to put()");
+        let now_zero = entry.refcount.put(token);
+        if now_zero {
+            let (k, v) = self
+                .inner
+                .remove(handle)
+                .expect("entry must exist when count reaches zero");
+            PutResult::Removed { key: k, value: v.value }
         } else {
-            // Stale handle; treat as live. Disarm token drop to avoid panic.
-            core::mem::forget(token);
             PutResult::Live
         }
     }
