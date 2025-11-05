@@ -33,7 +33,10 @@ impl DebugReentrancy {
         #[cfg(debug_assertions)]
         {
             let d = self.depth.get();
-            assert!(d == 0, "reentrancy detected: nested entry into data structure");
+            assert!(
+                d == 0,
+                "reentrancy detected: nested entry into data structure"
+            );
             self.depth.set(d + 1);
             return ReentrancyGuard { owner: self };
         }
@@ -46,7 +49,9 @@ impl DebugReentrancy {
 }
 
 impl Default for DebugReentrancy {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// RAII guard returned by `DebugReentrancy::enter`.

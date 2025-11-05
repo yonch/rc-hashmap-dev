@@ -17,7 +17,9 @@ pub struct Token<'a, C: ?Sized> {
 impl<'a, C: ?Sized> Token<'a, C> {
     #[inline]
     pub(crate) fn new() -> Self {
-        Self { _marker: PhantomData }
+        Self {
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -51,11 +53,15 @@ pub struct UsizeCount {
 
 impl UsizeCount {
     pub fn new(initial: usize) -> Self {
-        Self { count: Cell::new(initial) }
+        Self {
+            count: Cell::new(initial),
+        }
     }
 
     #[inline]
-    pub fn get_raw(&self) -> usize { self.count.get() }
+    pub fn get_raw(&self) -> usize {
+        self.count.get()
+    }
 
     /// Increment without producing a token; for internal RAII handle mgmt.
     #[inline]
@@ -63,7 +69,9 @@ impl UsizeCount {
         let c = self.count.get();
         let n = c.wrapping_add(1);
         self.count.set(n);
-        if n == 0 { std::process::abort(); }
+        if n == 0 {
+            std::process::abort();
+        }
         n
     }
 
@@ -79,7 +87,10 @@ impl UsizeCount {
 }
 
 impl Count for UsizeCount {
-    type Token<'a> = Token<'a, Self> where Self: 'a;
+    type Token<'a>
+        = Token<'a, Self>
+    where
+        Self: 'a;
 
     #[inline]
     fn get(&self) -> Self::Token<'_> {
@@ -116,12 +127,19 @@ impl<T> RcCount<T> {
         let weak = Rc::downgrade(rc);
         let raw = Rc::into_raw(rc.clone());
         unsafe { Rc::decrement_strong_count(raw) };
-        Self { ptr: raw, weak, _nosend: PhantomData }
+        Self {
+            ptr: raw,
+            weak,
+            _nosend: PhantomData,
+        }
     }
 }
 
 impl<T> Count for RcCount<T> {
-    type Token<'a> = Token<'a, Self> where Self: 'a;
+    type Token<'a>
+        = Token<'a, Self>
+    where
+        Self: 'a;
 
     #[inline]
     fn get(&self) -> Self::Token<'_> {

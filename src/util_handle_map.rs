@@ -11,8 +11,12 @@ use std::collections::hash_map::RandomState;
 pub struct Handle(DefaultKey);
 
 impl Handle {
-    pub(crate) fn new(k: DefaultKey) -> Self { Handle(k) }
-    pub(crate) fn key(&self) -> DefaultKey { self.0 }
+    pub(crate) fn new(k: DefaultKey) -> Self {
+        Handle(k)
+    }
+    pub(crate) fn key(&self) -> DefaultKey {
+        self.0
+    }
 
     pub fn key_ref<'a, K, V, S>(&self, map: &'a HandleHashMap<K, V, S>) -> Option<&'a K>
     where
@@ -30,10 +34,7 @@ impl Handle {
         map.handle_value(*self)
     }
 
-    pub fn value_mut<'a, K, V, S>(
-        &self,
-        map: &'a mut HandleHashMap<K, V, S>,
-    ) -> Option<&'a mut V>
+    pub fn value_mut<'a, K, V, S>(&self, map: &'a mut HandleHashMap<K, V, S>) -> Option<&'a mut V>
     where
         K: Eq + Hash,
         S: BuildHasher + Clone + Default,
@@ -93,17 +94,18 @@ where
         h.finish()
     }
 
-    pub fn len(&self) -> usize { self.slots.len() }
-    pub fn is_empty(&self) -> bool { self.slots.is_empty() }
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
 
     pub fn find(&self, key: &K) -> Option<Handle> {
         let _g = self.reentrancy.enter();
         let hash = self.make_hash(key);
         if let Some(&k) = self.index.get(hash, |&k| {
-            self.slots
-                .get(k)
-                .map(|e| &e.key == key)
-                .unwrap_or(false)
+            self.slots.get(k).map(|e| &e.key == key).unwrap_or(false)
         }) {
             return Some(Handle::new(k));
         }
@@ -119,7 +121,12 @@ where
         let hash = self.make_hash(q);
         if self
             .index
-            .get(hash, |&k| self.slots.get(k).map(|e| e.key.borrow() == q).unwrap_or(false))
+            .get(hash, |&k| {
+                self.slots
+                    .get(k)
+                    .map(|e| e.key.borrow() == q)
+                    .unwrap_or(false)
+            })
             .is_some()
         {
             return true;
@@ -132,7 +139,9 @@ where
         let hash = self.make_hash(&key);
         if self
             .index
-            .get(hash, |&k| self.slots.get(k).map(|e| e.key == key).unwrap_or(false))
+            .get(hash, |&k| {
+                self.slots.get(k).map(|e| e.key == key).unwrap_or(false)
+            })
             .is_some()
         {
             return Err(InsertError::DuplicateKey);
@@ -142,7 +151,12 @@ where
         // Find insertion slot; duplicate returns Ok(bucket)
         match self.index.find_or_find_insert_slot(
             hash,
-            |&kk| self.slots.get(kk).map(|e| e.hash == hash && e.key == entry.key).unwrap_or(false),
+            |&kk| {
+                self.slots
+                    .get(kk)
+                    .map(|e| e.hash == hash && e.key == entry.key)
+                    .unwrap_or(false)
+            },
             |&kk| self.slots.get(kk).map(|e| e.hash).unwrap_or(0),
         ) {
             Ok(_) => return Err(InsertError::DuplicateKey),
@@ -218,17 +232,17 @@ mod tests {
     #[test]
     fn find_contains_parity() {
         let mut m: HandleHashMap<String, i32> = HandleHashMap::new();
-        let present = ["a", "b", "c"]; 
+        let present = ["a", "b", "c"];
         for (i, k) in present.iter().enumerate() {
             m.insert((*k).to_string(), i as i32).unwrap();
         }
 
-        for k in present { 
+        for k in present {
             let s = k.to_string();
             assert_eq!(m.find(&s).is_some(), m.contains_key(&s));
         }
 
-        for k in ["x", "y", "z"] { 
+        for k in ["x", "y", "z"] {
             let s = k.to_string();
             assert_eq!(m.find(&s).is_some(), m.contains_key(&s));
             assert!(!m.contains_key(&s));
@@ -252,7 +266,13 @@ mod tests {
         let h = m.insert("k1".to_string(), 10).unwrap();
         assert_eq!(h.key_ref(&m), Some(&"k1".to_string()));
         assert_eq!(h.value_ref(&m), Some(&10));
-        let new_val = h.value_mut(&mut m).map(|v| { *v += 5; *v }).unwrap();
+        let new_val = h
+            .value_mut(&mut m)
+            .map(|v| {
+                *v += 5;
+                *v
+            })
+            .unwrap();
         assert_eq!(new_val, 15);
         assert_eq!(h.value_ref(&m), Some(&15));
 
@@ -281,16 +301,28 @@ mod tests {
     fn iteration_and_mutation() {
         let mut m: HandleHashMap<String, i32> = HandleHashMap::new();
         let keys = ["k1", "k2", "k3"];
-        for (i, k) in keys.iter().enumerate() { m.insert((*k).to_string(), i as i32).unwrap(); }
+        for (i, k) in keys.iter().enumerate() {
+            m.insert((*k).to_string(), i as i32).unwrap();
+        }
 
         let seen: BTreeSet<String> = m.iter().map(|(_h, k, _v)| k.clone()).collect();
         let expected: BTreeSet<String> = keys.iter().map(|s| (*s).to_string()).collect();
         assert_eq!(seen, expected);
 
-        for (_h, _k, v) in m.iter_mut() { *v += 10; }
+        for (_h, _k, v) in m.iter_mut() {
+            *v += 10;
+        }
         for k in keys {
             let h = m.find(&k.to_string()).unwrap();
-            assert_eq!(h.value_ref(&m), Some(&match k { "k1" => 10, "k2" => 11, "k3" => 12, _ => unreachable!() }));
+            assert_eq!(
+                h.value_ref(&m),
+                Some(&match k {
+                    "k1" => 10,
+                    "k2" => 11,
+                    "k3" => 12,
+                    _ => unreachable!(),
+                })
+            );
         }
     }
 
@@ -303,14 +335,19 @@ mod tests {
         struct ConstHasher;
         impl BuildHasher for ConstBuildHasher {
             type Hasher = ConstHasher;
-            fn build_hasher(&self) -> Self::Hasher { ConstHasher }
+            fn build_hasher(&self) -> Self::Hasher {
+                ConstHasher
+            }
         }
         impl core::hash::Hasher for ConstHasher {
             fn write(&mut self, _bytes: &[u8]) {}
-            fn finish(&self) -> u64 { 0 } // force all keys into the same hash bucket
+            fn finish(&self) -> u64 {
+                0
+            } // force all keys into the same hash bucket
         }
 
-        let mut m: HandleHashMap<String, i32, ConstBuildHasher> = HandleHashMap::with_hasher(ConstBuildHasher);
+        let mut m: HandleHashMap<String, i32, ConstBuildHasher> =
+            HandleHashMap::with_hasher(ConstBuildHasher);
         m.insert("a".to_string(), 1).unwrap();
         m.insert("b".to_string(), 2).unwrap();
 
@@ -349,7 +386,11 @@ mod tests {
         let h = m
             .insert(
                 "rk".to_string(),
-                ReenterOnDrop { map: &m as *const _, removed_key: "rk".to_string(), observed: observed.clone() },
+                ReenterOnDrop {
+                    map: &m as *const _,
+                    removed_key: "rk".to_string(),
+                    observed: observed.clone(),
+                },
             )
             .unwrap();
 
@@ -357,7 +398,11 @@ mod tests {
         drop(k);
         drop(v); // triggers Drop, which re-enters the map
 
-        assert_eq!(observed.get(), Some(false), "index must be unlinked before Drop");
+        assert_eq!(
+            observed.get(),
+            Some(false),
+            "index must be unlinked before Drop"
+        );
         assert_eq!(m.len(), 0);
     }
 
@@ -371,11 +416,15 @@ mod tests {
         struct ConstHasher;
         impl BuildHasher for ConstBuildHasher {
             type Hasher = ConstHasher;
-            fn build_hasher(&self) -> Self::Hasher { ConstHasher }
+            fn build_hasher(&self) -> Self::Hasher {
+                ConstHasher
+            }
         }
         impl core::hash::Hasher for ConstHasher {
             fn write(&mut self, _bytes: &[u8]) {}
-            fn finish(&self) -> u64 { 0 }
+            fn finish(&self) -> u64 {
+                0
+            }
         }
 
         struct ReentryKey {
@@ -384,11 +433,15 @@ mod tests {
             trigger: bool,
         }
         impl core::fmt::Debug for ReentryKey {
-            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { f.write_str(self.id) }
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str(self.id)
+            }
         }
         impl PartialEq for ReentryKey {
             fn eq(&self, other: &Self) -> bool {
-                if self.id == other.id { return true; }
+                if self.id == other.id {
+                    return true;
+                }
                 if other.trigger {
                     // Attempt to re-enter the same map during probing.
                     unsafe {
@@ -401,19 +454,35 @@ mod tests {
         }
         impl Eq for ReentryKey {}
         impl Hash for ReentryKey {
-            fn hash<H: Hasher>(&self, state: &mut H) { self.id.hash(state); }
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                self.id.hash(state);
+            }
         }
         impl core::borrow::Borrow<str> for ReentryKey {
-            fn borrow(&self) -> &str { self.id }
+            fn borrow(&self) -> &str {
+                self.id
+            }
         }
 
-        let mut m: HandleHashMap<ReentryKey, i32, ConstBuildHasher> = HandleHashMap::with_hasher(ConstBuildHasher);
-        let key = ReentryKey { id: "a", map: core::ptr::null(), trigger: false };
+        let mut m: HandleHashMap<ReentryKey, i32, ConstBuildHasher> =
+            HandleHashMap::with_hasher(ConstBuildHasher);
+        let key = ReentryKey {
+            id: "a",
+            map: core::ptr::null(),
+            trigger: false,
+        };
         // Set map pointer after creation
-        let key = ReentryKey { map: &m as *const _, ..key };
+        let key = ReentryKey {
+            map: &m as *const _,
+            ..key
+        };
         m.insert(key, 1).unwrap();
 
-        let query = ReentryKey { id: "b", map: &m as *const _, trigger: true };
+        let query = ReentryKey {
+            id: "b",
+            map: &m as *const _,
+            trigger: true,
+        };
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = m.find(&query);
         }));
