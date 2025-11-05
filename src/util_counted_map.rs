@@ -2,7 +2,7 @@
 
 use crate::tokens::{Count, Token, UsizeCount};
 use crate::util_handle_map::{Handle, HandleHashMap, InsertError};
-use core::mem::ManuallyDrop;
+use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 
 #[derive(Debug)]
@@ -27,7 +27,8 @@ pub struct CountedHashMap<K, V, S = std::collections::hash_map::RandomState> {
 /// Counted handle carrying a linear token tied to the entry counter.
 pub struct CountedHandle<'a> {
     pub(crate) handle: Handle,
-    pub(crate) token: ManuallyDrop<Token<'a, UsizeCount>>, // ZST, disarmed on Drop
+    pub(crate) token: Token<'static, UsizeCount>, // ZST token owned and consumed by put()
+    pub(crate) _brand: PhantomData<&'a ()>,
 }
 
 impl<'a> CountedHandle<'a> {
@@ -96,11 +97,7 @@ where
     pub fn find(&self, key: &K) -> Option<CountedHandle<'_>> {
         let h = self.inner.find(key)?;
         let t = self.inner.handle_value(h)?.refcount.get();
-        let t_static: Token<'static, UsizeCount> = unsafe { core::mem::transmute(t) };
-        Some(CountedHandle {
-            handle: h,
-            token: ManuallyDrop::new(t_static),
-        })
+        Some(CountedHandle { handle: h, token: t, _brand: PhantomData })
     }
 
     pub fn contains_key<Q>(&self, q: &Q) -> bool
@@ -122,11 +119,7 @@ where
             .expect("handle must be valid immediately after insert")
             .refcount
             .get();
-        let t_static: Token<'static, UsizeCount> = unsafe { core::mem::transmute(token) };
-        Ok(CountedHandle {
-            handle,
-            token: ManuallyDrop::new(t_static),
-        })
+        Ok(CountedHandle { handle, token, _brand: PhantomData })
     }
 
     /// Mint another token for the same entry; used to clone a counted handle.
@@ -137,23 +130,18 @@ where
             .expect("handle must be valid while counted handle is live")
             .refcount
             .get();
-        let t_static: Token<'static, UsizeCount> = unsafe { core::mem::transmute(t) };
-        CountedHandle {
-            handle: h.handle,
-            token: ManuallyDrop::new(t_static),
-        }
+        CountedHandle { handle: h.handle, token: t, _brand: PhantomData }
     }
 
     /// Return a token for an entry; removes and returns (K, V) when count hits zero.
-    pub fn put(&mut self, mut h: CountedHandle<'_>) -> PutResult<K, V> {
-        if let Some(entry) = self.inner.handle_value(h.handle) {
-            let tok: Token<'static, UsizeCount> =
-                unsafe { core::mem::transmute(ManuallyDrop::take(&mut h.token)) };
-            let now_zero = entry.refcount.put(tok);
+    pub fn put(&mut self, h: CountedHandle<'_>) -> PutResult<K, V> {
+        let CountedHandle { handle, token, .. } = h;
+        if let Some(entry) = self.inner.handle_value(handle) {
+            let now_zero = entry.refcount.put(token);
             if now_zero {
                 let (k, v) = self
                     .inner
-                    .remove(h.handle)
+                    .remove(handle)
                     .expect("entry must exist when count reaches zero");
                 return PutResult::Removed {
                     key: k,
@@ -163,8 +151,7 @@ where
             PutResult::Live
         } else {
             // Stale handle; treat as live. Disarm token drop to avoid panic.
-            let tok = unsafe { ManuallyDrop::take(&mut h.token) };
-            core::mem::forget(tok);
+            core::mem::forget(token);
             PutResult::Live
         }
     }
@@ -199,17 +186,13 @@ pub struct ItemGuard<'a, K, V> {
     key: &'a K,
     value: &'a V,
     counter: &'a UsizeCount,
-    token: Option<Token<'a, UsizeCount>>, // consumed on Drop
+    token: Option<Token<'static, UsizeCount>>, // consumed on Drop
 }
 
 impl<'a, K, V> ItemGuard<'a, K, V> {
     pub fn handle(&self) -> CountedHandle<'a> {
         let t = self.counter.get();
-        let t_static: Token<'static, UsizeCount> = unsafe { core::mem::transmute(t) };
-        CountedHandle {
-            handle: self.handle,
-            token: ManuallyDrop::new(t_static),
-        }
+        CountedHandle { handle: self.handle, token: t, _brand: PhantomData }
     }
     pub fn key(&self) -> &'a K {
         self.key
@@ -240,17 +223,13 @@ pub struct ItemGuardMut<'a, K, V> {
     key: &'a K,
     value: &'a mut V,
     counter: &'a UsizeCount,
-    token: Option<Token<'a, UsizeCount>>, // consumed on Drop
+    token: Option<Token<'static, UsizeCount>>, // consumed on Drop
 }
 
 impl<'a, K, V> ItemGuardMut<'a, K, V> {
     pub fn handle(&self) -> CountedHandle<'a> {
         let t = self.counter.get();
-        let t_static: Token<'static, UsizeCount> = unsafe { core::mem::transmute(t) };
-        CountedHandle {
-            handle: self.handle,
-            token: ManuallyDrop::new(t_static),
-        }
+        CountedHandle { handle: self.handle, token: t, _brand: PhantomData }
     }
     pub fn key(&self) -> &'a K {
         self.key
