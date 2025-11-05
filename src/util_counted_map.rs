@@ -97,7 +97,11 @@ where
     pub fn find(&self, key: &K) -> Option<CountedHandle<'_>> {
         let h = self.inner.find(key)?;
         let t = self.inner.handle_value(h)?.refcount.get();
-        Some(CountedHandle { handle: h, token: t, _brand: PhantomData })
+        Some(CountedHandle {
+            handle: h,
+            token: t,
+            _brand: PhantomData,
+        })
     }
 
     pub fn contains_key<Q>(&self, q: &Q) -> bool
@@ -110,16 +114,21 @@ where
 
     /// Insert a new key -> value and mint a token for the returned handle.
     pub fn insert(&mut self, key: K, value: V) -> Result<CountedHandle<'_>, InsertError> {
-        // First, insert the entry so the counter lives in the map.
-        let handle = self.inner.insert(key, Counted::new(value, 0))?;
-        // Then mint a token from the stored counter to return.
-        let token = self
-            .inner
-            .handle_value(handle)
-            .expect("handle must be valid immediately after insert")
-            .refcount
-            .get();
-        Ok(CountedHandle { handle, token, _brand: PhantomData })
+        let refcount = UsizeCount::new(0);
+        let token = refcount.get();
+        let counted = Counted { refcount, value };
+        match self.inner.insert(key, counted) {
+            Ok(handle) => Ok(CountedHandle {
+                handle,
+                token,
+                _brand: PhantomData,
+            }),
+            Err(e) => {
+                // disarm the panic on dropped token
+                std::mem::forget(token);
+                Err(e)
+            }
+        }
     }
 
     /// Mint another token for the same entry; used to clone a counted handle.
@@ -130,7 +139,11 @@ where
             .expect("handle must be valid while counted handle is live")
             .refcount
             .get();
-        CountedHandle { handle: h.handle, token: t, _brand: PhantomData }
+        CountedHandle {
+            handle: h.handle,
+            token: t,
+            _brand: PhantomData,
+        }
     }
 
     /// Return a token for an entry; removes and returns (K, V) when count hits zero.
@@ -146,7 +159,10 @@ where
                 .inner
                 .remove(handle)
                 .expect("entry must exist when count reaches zero");
-            PutResult::Removed { key: k, value: v.value }
+            PutResult::Removed {
+                key: k,
+                value: v.value,
+            }
         } else {
             PutResult::Live
         }
@@ -188,7 +204,11 @@ pub struct ItemGuard<'a, K, V> {
 impl<'a, K, V> ItemGuard<'a, K, V> {
     pub fn handle(&self) -> CountedHandle<'a> {
         let t = self.counter.get();
-        CountedHandle { handle: self.handle, token: t, _brand: PhantomData }
+        CountedHandle {
+            handle: self.handle,
+            token: t,
+            _brand: PhantomData,
+        }
     }
     pub fn key(&self) -> &'a K {
         self.key
@@ -225,7 +245,11 @@ pub struct ItemGuardMut<'a, K, V> {
 impl<'a, K, V> ItemGuardMut<'a, K, V> {
     pub fn handle(&self) -> CountedHandle<'a> {
         let t = self.counter.get();
-        CountedHandle { handle: self.handle, token: t, _brand: PhantomData }
+        CountedHandle {
+            handle: self.handle,
+            token: t,
+            _brand: PhantomData,
+        }
     }
     pub fn key(&self) -> &'a K {
         self.key
