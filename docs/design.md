@@ -10,7 +10,7 @@ Summary
 
 Why this split?
 - Localize invariants: each layer has a small, precise contract. We can test and audit them separately.
-- Keep unsafe to a minimum: raw-pointer handling is isolated in a small `ManualRc<T>` helper used by RcHashMap; pure indexing logic is safe Rust.
+- Keep unsafe to a minimum: raw-pointer handling is isolated behind `RcCount<T>` used by RcHashMap; pure indexing logic is safe Rust.
 - Clear failure boundaries: HandleHashMap never calls into user code once the data structure is in a consistent state.
 
 Module 1: HandleHashMap
@@ -43,92 +43,100 @@ Module 1: HandleHashMap
   - No refcounting or keepalive here; purely structural.
 
 Module 2: CountedHashMap
-- Purpose: Add simple reference counting on top of HandleHashMap. Reuses the same `Handle` type and adds explicit counting operations.
+- Purpose: Add simple reference counting on top of HandleHashMap, enforced with linear Tokens carried by a lifetime-bound handle.
 - Representation
-  - Wrap values as Counted<V> = { refcount: Cell<usize>, value: V }.
+  - Wrap values as Counted<V> = { refcount: UsizeCount, value: V }.
   - Internally: HandleHashMap<K, Counted<V>, S>.
 - API (same surface, plus helpers)
-  - find(&self, key: &K) -> Option<Handle>
-    - If found, increments refcount and returns a `Handle`. Uses interior mutability for the count.
-  - insert(&mut self, key: K, value: V) -> Result<Handle, InsertError>
-    - Delegates to HandleHashMap’s unique insertion. On success, initializes refcount = 1 and returns a `Handle`.
+  - find(&self, key: &K) -> Option<CountedHandle<'_>>
+    - If found, mints a token from the entry’s `UsizeCount` and returns a `CountedHandle<'_>` carrying that token (lifetime-bound to the counter value).
+  - insert(&mut self, key: K, value: V) -> Result<CountedHandle<'_>, InsertError>
+    - Delegates to HandleHashMap’s unique insertion. On success, initializes refcount by minting and returning a token in the resulting handle.
   - contains_key<Q>(&self, q: &Q) -> bool where K: Borrow<Q>, Q: ?Sized + Hash + Eq
     - Probes using the index without incrementing refcounts.
-  - put(&self, handle: Handle) -> PutResult
-    - Decrements refcount; if it reaches 0, removes the handle's slot from the underlying HandleHashMap and returns `PutResult::Removed { key: K, value: V }`. Otherwise returns `PutResult::Live`.
-  - get(&self, handle: Handle)
-    - Increments for cloning/duplication of a handle reference; overflow is unchecked (UB), consistent with `Rc`; panics on invalid handle in debug builds.
+  - put(&self, handle: CountedHandle<'_>) -> PutResult
+    - Consumes `handle`, moves out its token and returns it to the entry’s `UsizeCount`. If it reaches 0, removes the slot from the underlying `HandleHashMap` and returns `PutResult::Removed { key: K, value: V }`. Otherwise returns `PutResult::Live`.
+  - get(&self, handle: &CountedHandle<'_>) -> CountedHandle<'_>
+    - Clones by minting another token from the same entry’s `UsizeCount`; overflow/panic behavior is defined by `UsizeCount` (see tokens.md).
   - len(&self) -> usize; is_empty(&self) -> bool
   - iter(&self) -> impl Iterator<Item = ItemGuard<'_, K, V>>
-    - Before yielding each item, increments the entry's refcount. Yields an RAII guard that:
-      - exposes `handle() -> Handle`, `key() -> &K`, `value() -> &V` (and `Deref<Target = V>`),
-      - on Drop, calls `put(handle)` to release the increment.
+    - Before yielding each item, mints a token from the entry's `UsizeCount`. Yields an RAII guard that:
+      - exposes `handle() -> CountedHandle<'_>`, `key() -> &K`, `value() -> &V` (and `Deref<Target = V>`),
+      - on Drop, returns the guard’s token to the entry’s `UsizeCount` to release the increment.
     - This ensures `put` is balanced correctly and never runs while `&K`/`&V` are still borrowed.
   - iter_mut(&mut self) -> impl Iterator<Item = ItemGuardMut<'_, K, V>>
-    - Before yielding each item, increments the entry's refcount. Yields an RAII guard that:
-      - exposes `handle() -> Handle`, `key() -> &K`, `value_mut() -> &mut V` (and `DerefMut<Target = V>`),
-      - on Drop, calls `put(handle)` to release the increment.
+    - Before yielding each item, mints a token from the entry's `UsizeCount`. Yields an RAII guard that:
+      - exposes `handle() -> CountedHandle<'_>`, `key() -> &K`, `value_mut() -> &mut V` (and `DerefMut<Target = V>`),
+      - on Drop, returns the guard’s token to the entry’s `UsizeCount` to release the increment.
     - Using a guard keeps semantics parallel to Module 3 (where `Ref` acts as the guard) and ensures refcount is balanced even on early loop exit.  
   - Notes
   - Unique-key policy is enforced in Module 1 and reused here unchanged; refcounting is orthogonal.
   - All increments/decrements are interior-mutable and single-threaded.
   - The underlying HandleHashMap remains consistent at all times; drops of K and V happen only after the handle's slot is removed from both index and storage.
 
-ManualRc: Raw Rc keeper
+RcCount: Token-based Rc strong-count helper
 
-- Purpose: Encapsulate the use of the raw `Rc` pointer and the calls to `Rc::increment_strong_count` / `Rc::decrement_strong_count` behind a tiny helper that also holds a `Weak<T>` so we can reason about safety (allocation liveness) separately from the per-entry refcount protocol.
-- Construction: `ManualRc::new(&Rc<T>)` clones the `Rc`, calls `Rc::into_raw` to obtain a pointer suitable for `increment_strong_count`/`decrement_strong_count`, stores that pointer, and immediately drops the temporary clone by calling `Rc::decrement_strong_count(ptr)`. It also stores a `Weak<T>` derived from the same `Rc` with `Rc::downgrade(&rc)`.
-- API:
-  - `fn get(&self)` — increments the strong count via the stored raw pointer; this is used when an entry becomes (or remains) live (e.g., insert or successful `get`).
-  - `fn put(&self)` — decrements the strong count; this is used on final removal after `(K, V)` have been dropped.
-  - `fn as_ptr(&self) -> *const T` — exposes the raw pointer for identity checks where needed (e.g., `Ref` owner equality).
+- Purpose: Encapsulate `Rc::increment_strong_count` / `Rc::decrement_strong_count` behind the `Count`/`Token` interface. Callers only hold Tokens and never call the raw inc/dec directly.
+- Construction: `RcCount::new(&Rc<T>)` stores a raw pointer compatible with `Rc::{increment,decrement}_strong_count` and a `Weak<T>` for debug checks. It immediately drops a temporary clone used to obtain the raw pointer.
+- API (Count):
+  - `get(&self) -> Token<'_, RcCount<T>>` — increments the strong count and returns a linear token.
+  - `put(&self, t: Token<'_, RcCount<T>>) -> bool` — decrements and returns whether the strong count was 1 before the decrement.
 - Invariants and checks:
-  - The stored pointer originates from `Rc::into_raw` on an `Rc<T>` referencing the same allocation as the stored `Weak<T>`; we never derive the pointer from `Weak::as_ptr`.
-  - `get()`/`put()` do not upgrade the `Weak`; they rely on the map’s protocol to only call them while the allocation is alive. For debug builds we may assert `self.weak.strong_count() > 0` before `get()`.
-  - `ManualRc<T>` is `!Send + !Sync` (like `Rc<T>`). It does not own a strong count.
+  - The raw pointer originates from `Rc::into_raw` on an `Rc<T>` referencing the same allocation as the stored `Weak<T>`; never use `Weak::as_ptr`.
+  - No upgrades of the `Weak`; under single-threaded use, debug assertions may check `weak.strong_count() > 0` before `get`.
+  - `RcCount<T>` is `!Send + !Sync` (like `Rc<T>`).
 
 Sketch:
 
 ```
-struct ManualRc<T> {
+pub struct RcCount<T> {
     ptr: *const T,
     weak: std::rc::Weak<T>,
-    _nosend: std::marker::PhantomData<*mut ()>,
+    _nosend: core::marker::PhantomData<*mut ()>,
 }
-impl<T> ManualRc<T> {
-    fn new(rc: &std::rc::Rc<T>) -> Self {
+
+impl<T> RcCount<T> {
+    pub fn new(rc: &std::rc::Rc<T>) -> Self {
         let weak = std::rc::Rc::downgrade(rc);
         let raw = std::rc::Rc::into_raw(rc.clone());
-        unsafe { std::rc::Rc::decrement_strong_count(raw) }; // drop the temporary clone
-        Self { ptr: raw, weak, _nosend: std::marker::PhantomData }
+        unsafe { std::rc::Rc::decrement_strong_count(raw) };
+        Self { ptr: raw, weak, _nosend: core::marker::PhantomData }
     }
-    fn get(&self) { debug_assert!(self.weak.strong_count() > 0); unsafe { std::rc::Rc::increment_strong_count(self.ptr) } }
-    fn put(&self) { unsafe { std::rc::Rc::decrement_strong_count(self.ptr) } }
-    fn as_ptr(&self) -> *const T { self.ptr }
+}
+
+impl Count for RcCount<T> {
+    type Token<'a> = Token<'a, Self> where Self: 'a;
+    fn get(&self) -> Self::Token<'_> { unsafe { std::rc::Rc::increment_strong_count(self.ptr) }; Token::new() }
+    fn put<'a>(&'a self, t: Self::Token<'a>) -> bool {
+        let was_one = self.weak.strong_count() == 1;
+        unsafe { std::rc::Rc::decrement_strong_count(self.ptr) };
+        core::mem::forget(t);
+        was_one
+    }
 }
 ```
 
 Module 3: RcHashMap
 - Purpose: Public, ergonomic API with `Ref` handles, Rc-based keepalive, and owner identity checks. Internally holds `Rc<Inner>`.
-- Keepalive model (via Rc strong counts)
-  - `Inner` holds a `ManualRc<Inner>` keeper created from the map’s `Rc<Inner>` at construction time (e.g., via `Rc::new_cyclic`). The keeper owns no strong count; it only stores the raw pointer and a `Weak` for reasoning/debug assertions.
-  - Each live entry contributes one additional strong count: on successful insertion, call `keeper.get()`; on final removal (when the entry’s `refcount` reaches 0 and the slot is removed), call `keeper.put()`.
-  - Dropping RcHashMap drops its own `Rc` handle; if entries still exist, their per-entry strong counts keep `Inner` alive until those entries are removed.
-  - Final removal order and rationale: drop `K` and `V` first while `Inner` remains alive (kept by the per-entry strong count), then decrement the per-entry strong count. This preserves safety if user `Drop` for `K`/`V` reenters the map.
+- Keepalive model (via RcCount + Tokens)
+  - `Inner` holds an `RcCount<Inner>` created from the map’s `Rc<Inner>` at construction time. It exposes `get()`/`put()` via the `Count` trait and returns linear Tokens.
+  - Each live entry contributes one additional strong count: on successful insertion, mint a token from `Inner.keepalive` and store it inside the entry. On final removal (when the entry’s `refcount` reaches 0 and the slot is removed), move this token out and return it to `keepalive`.
+  - Dropping RcHashMap drops its own `Rc` handle; if entries still exist, their per-entry keepalive tokens keep `Inner` alive until those entries are removed.
+  - Final removal order and rationale: drop `K` and `V` first while `Inner` remains alive (kept by the per-entry keepalive token), then return the token via `keepalive.put(token)`. This preserves safety if user `Drop` for `K`/`V` reenters the map.
   - Length as an invariant aid: all three layers expose `len()`/`is_empty()`. Although Rc-based keepalive does not require checking `len()==0` to trigger deallocation, `len()==0` on `CountedHashMap` precisely indicates “no live entries remain”, which is useful for assertions and tests around last-entry removal.
   - Refcount rationale (conceptual model → efficient implementation):
     - Conceptually, every `Ref` keeps two things alive: (1) its specific entry `(K,V)` and (2) the owning map. If implemented literally with `Rc<(K,V)>` stored per entry and an `Rc<Inner>` inside every `Ref`, this would add heap and pointer overhead to every entry and every `Ref` clone.
     - Instead, we implement the same semantics at lower cost:
-      - Entry liveness is tracked by a per-entry `usize` refcount in `CountedHashMap`. Cloning/dropping `Ref` only touches this counter.
-      - Map keepalive is centralized: each live entry contributes exactly one extra `Rc<Inner>` strong count for the entire duration the entry is live (i.e., while its per-entry refcount is ≥ 1). We increment this strong count once on insertion (transition to live), and we decrement it once at final removal (transition to dead). Cloning additional `Ref`s to the same entry does not touch the map’s strong count.
-      - We avoid storing an `Rc` inside each entry. `Inner` holds a `ManualRc<Inner>` that exposes `get()`/`put()` to manage the per-entry keepalive without extra per-entry allocations or pointer fields.
+      - Entry liveness is tracked by a per-entry counter (`UsizeCount`) in `CountedHashMap`. Cloning/dropping `Ref` only touches this counter.
+      - Map keepalive is centralized: each live entry holds exactly one token minted from `Inner.keepalive` for the entire duration the entry is live (while its per-entry refcount is ≥ 1). We mint this token once on insertion (transition to live), and return it once at final removal (transition to dead). Cloning additional `Ref`s to the same entry does not touch the map’s strong count.
+      - We avoid storing an `Rc` inside each entry; instead, entries store a zero-sized token tied to `Inner.keepalive`.
     - The net effect matches the intuitive model: a `Ref` prevents its entry from being removed, and as long as any entry is live, the map’s `Inner` remains alive. We achieve this without embedding `Rc` in each entry or per-`Ref` heap work.
 - Unique keys policy
   - RcHashMap enforces unique keys by delegating to Module 1’s unique insertion. `insert` fails if the key already exists (no modification).
 - Ref
   - Fields: `{ slot: DefaultKey, owner: NonNull<Inner<…>>, _nosend: PhantomData<*mut ()> }`.
   - Clone: `impl Clone for Ref` increments per-entry count via `get`; overflow is unchecked (UB) to match `Rc`.
-  - Drop: decrements per-entry count via `put`; if it reaches 0, performs physical removal. Removal path drops `K`/`V` first and then calls `keeper.put()`.
+  - Drop: decrements per-entry count via `put`; if it reaches 0, performs physical removal. Removal path drops `K`/`V` first; the entry’s `Drop` then returns its keepalive token to `inner.keepalive`.
   - Hash/Eq: `(owner_ptr, slot)`.
   - Accessors
   - `get<Q>(&self, key: &Q) -> Option<Ref>` where `K: Borrow<Q>, Q: Hash + Eq`: delegates to `counted.find(key)` which increments the per-entry refcount upon success.
@@ -152,7 +160,7 @@ Module 3: RcHashMap
 
 Correctness and footguns
 - The only user code that can run while the structure is not yet consistent is `K: Hash` and `K: Eq` during probing. These must not reenter the map or cause observable aliasing.
-- Final removal order: remove from index → remove from storage and obtain `(K, V)` → drop `K` and `V` → then call `keeper.put()` to decrement the per-entry Rc strong count. See rationale under Keepalive model.
+- Final removal order: remove from index → remove from storage and obtain `(K, V)` → drop `K` and `V` → then the entry returns its keepalive token to `inner.keepalive` to decrement the per-entry Rc strong count. See rationale under Keepalive model.
 - Because removal happens only on the last handle for that entry, no other `Ref` to the entry exists. If other entries still have `Ref`s, their per-entry strong counts keep `Inner` alive across this decrement.
 - Single-threaded only; both `RcHashMap` and `Ref` are `!Send + !Sync` (enforced with `PhantomData<*mut ()>` on `Ref`).
 
@@ -176,12 +184,20 @@ impl Handle {
 
 // CountedHashMap
 struct CountedHashMap<K, V, S>(HandleHashMap<K, Counted<V>, S>);
-struct Counted<V> { refcount: Cell<usize>, value: V }
+struct Counted<V> { refcount: UsizeCount, value: V }
+
+/// Lifetime-bound counted handle carrying a linear token tied to the entry counter.
+struct CountedHandle<'a> {
+    slot: DefaultKey,
+    counter: &'a UsizeCount,
+    token: Token<'a, UsizeCount>,
+}
+
 impl<K: Eq + Hash, V, S: BuildHasher> CountedHashMap<K, V, S> {
-    fn find<Q: ?Sized + Hash + Eq>(&self, q: &Q) -> Option<Handle> where K: Borrow<Q> { /* inc on hit */ }
-    fn insert(&mut self, k: K, v: V) -> Result<Handle, InsertError> { /* refcount=1; fail on dup */ }
-    fn get(&self, h: Handle) { /* inc for cloning; unchecked overflow (UB) */ }
-    fn put(&self, h: Handle) -> PutResult { /* dec; remove and return K,V at zero */ }
+    fn find<Q: ?Sized + Hash + Eq>(&self, q: &Q) -> Option<CountedHandle<'_>> where K: Borrow<Q> { /* mint token on hit */ }
+    fn insert(&mut self, k: K, v: V) -> Result<CountedHandle<'_>, InsertError> { /* init with token; fail on dup */ }
+    fn get(&self, h: &CountedHandle<'_>) -> CountedHandle<'_> { /* mint another token for cloning */ }
+    fn put(&self, h: CountedHandle<'_>) -> PutResult { /* consume token; remove and return K,V at zero */ }
     fn len(&self) -> usize { /* number of stored/live entries (refcount >= 1) */ }
     fn is_empty(&self) -> bool { self.len() == 0 }
 }
@@ -192,7 +208,7 @@ struct RcHashMap<K, V, S> {
 }
 struct Inner<K, V, S> {
     counted: CountedHashMap<K, V, S>,
-    keeper: ManualRc<Inner<K,V,S>>,
+    keepalive: RcCount<Inner<K,V,S>>,
     // plus interior mutability guards/markers to keep !Send + !Sync
 }
 struct Ref<K, V, S> {
@@ -203,13 +219,13 @@ struct Ref<K, V, S> {
 
 impl<K, V, S> RcHashMap<K, V, S> {
     fn insert(&mut self, k: K, v: V) -> Result<Ref<K,V,S>, InsertError> {
-        let handle = self.inner.counted.insert(k, v)?;
-        // Entry live: bump per-entry strong count
-        self.inner.keeper.get();
-        Ok(Ref { /* use handle's internal key … */ owner: /* NonNull::from(self.inner.as_ref()) */, _nosend: PhantomData })
+        let h = self.inner.counted.insert(k, v)?; // returns CountedHandle with entry refcount token
+        // Entry live: mint a keepalive token from `keepalive` and store it inside the new entry.
+        // The entry keeps this token in a ManuallyDrop and returns it at final removal.
+        Ok(Ref { /* use h.slot … */ owner: /* NonNull::from(self.inner.as_ref()) */, _nosend: PhantomData })
     }
     fn get<Q>(&self, q: &Q) -> Option<Ref<K,V,S>> where K: Borrow<Q>, Q: ?Sized + Hash + Eq {
-        self.inner.counted.find(q).map(|handle| Ref { /* … compute owner from &self.inner */ })
+        self.inner.counted.find(q).map(|h| Ref { /* … compute owner from &self.inner */ })
     }
     fn contains_key<Q>(&self, q: &Q) -> bool where K: Borrow<Q>, Q: ?Sized + Hash + Eq {
         self.inner.counted.contains_key(q)
@@ -224,15 +240,51 @@ impl<K, V, S> Ref<K, V, S> {
     fn value<'a>(&'a self, map: &'a RcHashMap<K,V,S>) -> Result<&'a V, WrongMap> { /* owner check, then read */ }
     fn value_mut<'a>(&'a self, map: &'a mut RcHashMap<K,V,S>) -> Result<&'a mut V, WrongMap> { /* owner check, then write */ }
     fn drop(&mut self) {
-        match unsafe { self.owner.as_ref() }.counted.put(/* Handle(self.slot) */) {
+        match unsafe { self.owner.as_ref() }.counted.put(/* CountedHandle(self.slot, …) */) {
             PutResult::Live => {}
             PutResult::Removed { key, value } => {
                 let _inner = unsafe { self.owner.as_ref() };
                 drop(key); drop(value);
-                // Final removal: drop the per-entry strong count via owner's keeper.
-                unsafe { self.owner.as_ref() }.keeper.put();
+                // Final removal: Entry::drop moves out the keepalive token and calls `keepalive.put(token)`.
             }
         }
+    }
+}
+```
+
+Entry keepalive via Tokens (Module 3)
+- Each stored entry holds a token minted from `Inner.keepalive` for as long as it is live. This keeps the `Inner` allocation alive across map drops and until the last entry is removed.
+- On final removal, after unlinking and dropping `K`/`V`, the entry’s `Drop` moves the token out (stored in `ManuallyDrop`) and returns it to `keepalive`.
+
+Sketch
+```rust
+struct Entry<'m, K, V, S> {
+    key: K,
+    value: V,
+    hash: u64,
+    // Per-entry user refcount (Module 2)
+    refcount: UsizeCount,
+    // Keep `Inner` alive while this entry exists (Module 3)
+    owner_token: core::mem::ManuallyDrop<Token<'m, RcCount<Inner<K,V,S>>>>,
+    keepalive: &'m RcCount<Inner<K,V,S>>,
+}
+
+impl<'m, K, V, S> Entry<'m, K, V, S> {
+    fn new(inner: &'m Inner<K,V,S>, key: K, value: V, hash: u64) -> Self {
+        let t = inner.keepalive.get();
+        Self {
+            key, value, hash,
+            refcount: UsizeCount::new(0),
+            owner_token: core::mem::ManuallyDrop::new(t),
+            keepalive: &inner.keepalive,
+        }
+    }
+}
+
+impl<'m, K, V, S> Drop for Entry<'m, K, V, S> {
+    fn drop(&mut self) {
+        let t = unsafe { core::mem::ManuallyDrop::take(&mut self.owner_token) };
+        let _now_zero = self.keepalive.put(t);
     }
 }
 ```
@@ -250,8 +302,8 @@ Testing plan
   - `len`/`is_empty` reflect the number of live entries (refcount >= 1); removal at zero decreases `len`.
 - RcHashMap
   - `Ref::clone` increments per-entry count; `Ref::drop` decrements and removes at zero.
-  - Rc-based keepalive: map drop with live entries leaves `Inner` alive via per-entry strong counts; final removal of last entry frees `Inner`.
-  - Removal path drops `K`/`V` before decrementing the per-entry strong count.
+  - Rc-based keepalive via tokens: map drop with live entries leaves `Inner` alive via per-entry keepalive tokens stored in entries; final removal of last entry frees `Inner` when the entry returns its token.
+  - Removal path drops `K`/`V` before the entry returns its keepalive token to `inner.keepalive`.
 - Owner identity and staleness: wrong-map `Ref` is rejected by accessors via owner-pointer check and returns `Err(WrongMap)`; `Eq`/`Hash` include `(owner_ptr, slot)`. Reference counting prevents stale `Ref`s: an entry cannot be physically removed (and its slot reused) while any `Ref` to it exists; we do not rely on SlotMap generations for `Ref` validity. Invariant: no external constructor for `Ref`; each `Ref` implies an associated per-entry strong count.
   - Unique keys enforced: `insert` fails on duplicate.
   - `len`/`is_empty` proxy to Module 2 and stay consistent across insert/get/put sequences.
