@@ -1,12 +1,23 @@
-use crate::tokens::Token;
+use crate::tokens::RcCount;
+// Keepalive handled via direct Rc strong-count inc/dec per entry.
 use crate::util_counted_map::{CountedHandle, CountedHashMap, PutResult};
-use crate::util_handle_map::{Handle, InsertError};
+use crate::util_handle_map::InsertError;
 use core::cell::RefCell;
 use core::hash::{Hash, Hasher};
+use core::marker::PhantomData;
+use std::ptr::NonNull;
 use std::rc::Rc;
 
+// Stored value wrapper that holds a raw pointer to `Inner` to keep
+// the allocation alive by manually adjusting Rc strong counts.
+struct RcVal<K, V, S> {
+    value: V,
+    owner_raw: *const Inner<K, V, S>,
+}
+
 struct Inner<K, V, S> {
-    map: RefCell<CountedHashMap<K, V, S>>, // single-threaded interior mutability
+    map: RefCell<CountedHashMap<K, RcVal<K, V, S>, S>>, // single-threaded interior mutability
+    keepalive: RcCount<Inner<K, V, S>>,
 }
 
 pub struct RcHashMap<K, V, S = std::collections::hash_map::RandomState> {
@@ -19,8 +30,13 @@ where
 {
     pub fn new() -> Self {
         Self {
-            inner: Rc::new(Inner {
+            inner: Rc::new_cyclic(|weak| Inner {
                 map: RefCell::new(CountedHashMap::new()),
+                keepalive: RcCount::new(
+                    &weak
+                        .upgrade()
+                        .expect("should be able to upgrade during Rc::new_cyclic"),
+                ),
             }),
         }
     }
@@ -33,8 +49,13 @@ where
 {
     pub fn with_hasher(hasher: S) -> Self {
         Self {
-            inner: Rc::new(Inner {
+            inner: Rc::new_cyclic(|weak| Inner {
                 map: RefCell::new(CountedHashMap::with_hasher(hasher)),
+                keepalive: RcCount::new(
+                    &weak
+                        .upgrade()
+                        .expect("should be able to upgrade during Rc::new_cyclic"),
+                ),
             }),
         }
     }
@@ -55,22 +76,33 @@ where
     }
 
     pub fn insert(&self, key: K, value: V) -> Result<Ref<K, V, S>, InsertError> {
-        let mut binding = self.inner.map.borrow_mut();
-        let ch = binding.insert(key, value)?;
-        // The returned counted handle holds a token representing one ref; transfer
-        // responsibility to the returned Ref by forgetting it here.
-        let handle = ch.handle;
-        core::mem::forget(ch.token);
-        Ok(Ref::new(self.inner.clone(), handle))
+        // Increment Inner strong count and wrap the user value with the raw pointer.
+        let raw = Rc::as_ptr(&self.inner);
+        unsafe { Rc::increment_strong_count(raw) };
+        let wrapped = RcVal {
+            value,
+            owner_raw: raw,
+        };
+
+        let mut map = self.inner.map.borrow_mut();
+        match map.insert(key, wrapped) {
+            Ok(ch) => {
+                let ch_static: CountedHandle<'static> = unsafe { core::mem::transmute(ch) };
+                Ok(Ref::new(NonNull::from(self.inner.as_ref()), ch_static))
+            }
+            Err(e) => {
+                // On failure, undo the strong-count increment.
+                unsafe { Rc::decrement_strong_count(raw) };
+                Err(e)
+            }
+        }
     }
 
     pub fn get(&self, key: &K) -> Option<Ref<K, V, S>> {
-        let binding = self.inner.map.borrow();
-        let ch = binding.find(key)?;
-        let handle = ch.handle;
-        // Transfer responsibility to the returned Ref.
-        core::mem::forget(ch.token);
-        Some(Ref::new(self.inner.clone(), handle))
+        let map = self.inner.map.borrow();
+        let ch = map.find(key)?;
+        let ch_static: CountedHandle<'static> = unsafe { core::mem::transmute(ch) };
+        Some(Ref::new(NonNull::from(self.inner.as_ref()), ch_static))
     }
 }
 
@@ -81,9 +113,9 @@ where
     K: Eq + core::hash::Hash,
     S: core::hash::BuildHasher + Clone + Default,
 {
-    owner: Rc<Inner<K, V, S>>, // keep owner alive
-    owner_ptr: *const Inner<K, V, S>,
-    handle: Handle,
+    owner_ptr: NonNull<Inner<K, V, S>>,
+    handle: Option<CountedHandle<'static>>,
+    _nosend: PhantomData<*mut ()>,
 }
 
 impl<K, V, S> Ref<K, V, S>
@@ -91,26 +123,22 @@ where
     K: Eq + core::hash::Hash,
     S: core::hash::BuildHasher + Clone + Default,
 {
-    fn new(owner: Rc<Inner<K, V, S>>, handle: Handle) -> Self {
-        let owner_ptr = Rc::as_ptr(&owner);
+    fn new(owner_ptr: NonNull<Inner<K, V, S>>, handle: CountedHandle<'static>) -> Self {
         Self {
-            owner,
             owner_ptr,
-            handle,
+            handle: Some(handle),
+            _nosend: PhantomData,
         }
     }
 
-    pub fn handle(&self) -> Handle {
-        self.handle
-    }
-
     pub fn value(&self) -> Option<std::cell::Ref<'_, V>> {
-        let borrow = self.owner.map.borrow();
-        if borrow.inner.handle_value(self.handle).is_some() {
+        let inner = unsafe { self.owner_ptr.as_ref() };
+        let borrow = inner.map.borrow();
+        let ch = self.handle.as_ref()?;
+        if ch.value_ref(&borrow).is_some() {
             Some(std::cell::Ref::map(borrow, |m| {
-                &m.inner
-                    .handle_value(self.handle)
-                    .expect("checked is_some above")
+                &ch.value_ref(m)
+                    .expect("entry must exist while Ref is live")
                     .value
             }))
         } else {
@@ -126,20 +154,11 @@ where
 {
     fn clone(&self) -> Self {
         // Increment per-entry count via counted handle API.
-        let borrow = self.owner.map.borrow();
-        // Create a temporary counted handle to use the API; forget its token
-        let temp = CountedHandle {
-            handle: self.handle,
-            token: Token::new(),
-        };
-        let more = borrow.get(&temp);
-        core::mem::forget(temp.token);
-        core::mem::forget(more.token);
-        Self {
-            owner: self.owner.clone(),
-            owner_ptr: self.owner_ptr,
-            handle: self.handle,
-        }
+        let inner = unsafe { self.owner_ptr.as_ref() };
+        let map = inner.map.borrow();
+        let ch2 = map.get(self.handle.as_ref().expect("live ref must have handle"));
+        let ch2_static: CountedHandle<'static> = unsafe { core::mem::transmute(ch2) };
+        Ref::new(self.owner_ptr, ch2_static)
     }
 }
 
@@ -149,20 +168,19 @@ where
     S: core::hash::BuildHasher + Clone + Default,
 {
     fn drop(&mut self) {
-        // Decrement; if zero, remove the entry immediately.
-        let res = {
-            let mut b = self.owner.map.borrow_mut();
-            let h = CountedHandle {
-                handle: self.handle,
-                token: Token::new(),
-            };
-            b.put(h)
-        };
-        if let PutResult::Removed { key: _k, value: _v } = res {
-            // Drop key then value in this scope.
-            // NOTE: values were returned already as moved by `put`.
-            // Explicit drops to document order.
-            // (Bindings already moved by match; nothing further to do.)
+        let inner = unsafe { self.owner_ptr.as_ref() };
+        if let Some(ch) = self.handle.take() {
+            let res = inner.map.borrow_mut().put(ch);
+            match res {
+                PutResult::Live => {}
+                PutResult::Removed { key, mut value } => {
+                    // Drop user data first while keepalive still holds Inner alive via strong count
+                    drop(key);
+                    drop(value.value);
+                    // Decrement strong count that was incremented on insert.
+                    unsafe { Rc::decrement_strong_count(value.owner_raw) };
+                }
+            }
         }
     }
 }
@@ -173,7 +191,8 @@ where
     S: core::hash::BuildHasher + Clone + Default,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.owner_ptr == other.owner_ptr && self.handle == other.handle
+        self.owner_ptr == other.owner_ptr
+            && self.handle.as_ref().map(|h| h.handle) == other.handle.as_ref().map(|h| h.handle)
     }
 }
 
@@ -190,7 +209,9 @@ where
     S: core::hash::BuildHasher + Clone + Default,
 {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        (self.owner_ptr as usize).hash(state);
-        self.handle.hash(state);
+        (self.owner_ptr.as_ptr() as usize).hash(state);
+        if let Some(h) = &self.handle {
+            h.handle.hash(state);
+        }
     }
 }
