@@ -1,4 +1,5 @@
-use crate::util_counted_map::CountedHashMap;
+use crate::tokens::Token;
+use crate::util_counted_map::{CountedHandle, CountedHashMap, PutResult};
 use crate::util_handle_map::{Handle, InsertError};
 use core::cell::RefCell;
 use core::hash::{Hash, Hasher};
@@ -54,15 +55,21 @@ where
     }
 
     pub fn insert(&self, key: K, value: V) -> Result<Ref<K, V, S>, InsertError> {
-        let handle = self.inner.map.borrow_mut().insert(key, value)?;
-        // Initialize refcount to 1 for the returned Ref
-        self.inner.map.borrow().inc(handle);
+        let mut binding = self.inner.map.borrow_mut();
+        let ch = binding.insert(key, value)?;
+        // The returned counted handle holds a token representing one ref; transfer
+        // responsibility to the returned Ref by forgetting it here.
+        let handle = ch.handle;
+        core::mem::forget(ch.token);
         Ok(Ref::new(self.inner.clone(), handle))
     }
 
     pub fn get(&self, key: &K) -> Option<Ref<K, V, S>> {
-        let handle = self.inner.map.borrow().find(key)?;
-        self.inner.map.borrow().inc(handle);
+        let binding = self.inner.map.borrow();
+        let ch = binding.find(key)?;
+        let handle = ch.handle;
+        // Transfer responsibility to the returned Ref.
+        core::mem::forget(ch.token);
         Some(Ref::new(self.inner.clone(), handle))
     }
 }
@@ -118,8 +125,16 @@ where
     S: core::hash::BuildHasher + Clone + Default,
 {
     fn clone(&self) -> Self {
-        // Increment per-entry count
-        self.owner.map.borrow().inc(self.handle);
+        // Increment per-entry count via counted handle API.
+        let borrow = self.owner.map.borrow();
+        // Create a temporary counted handle to use the API; forget its token
+        let temp = CountedHandle {
+            handle: self.handle,
+            token: Token::new(),
+        };
+        let more = borrow.get(&temp);
+        core::mem::forget(temp.token);
+        core::mem::forget(more.token);
         Self {
             owner: self.owner.clone(),
             owner_ptr: self.owner_ptr,
@@ -135,12 +150,19 @@ where
 {
     fn drop(&mut self) {
         // Decrement; if zero, remove the entry immediately.
-        let remove_now = {
-            let b = self.owner.map.borrow();
-            b.dec(self.handle).unwrap_or(false)
+        let res = {
+            let mut b = self.owner.map.borrow_mut();
+            let h = CountedHandle {
+                handle: self.handle,
+                token: Token::new(),
+            };
+            b.put(h)
         };
-        if remove_now {
-            let _ = self.owner.map.borrow_mut().remove(self.handle);
+        if let PutResult::Removed { key: _k, value: _v } = res {
+            // Drop key then value in this scope.
+            // NOTE: values were returned already as moved by `put`.
+            // Explicit drops to document order.
+            // (Bindings already moved by match; nothing further to do.)
         }
     }
 }
