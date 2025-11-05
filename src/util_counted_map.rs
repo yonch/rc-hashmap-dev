@@ -94,8 +94,12 @@ where
         self.inner.is_empty()
     }
 
-    pub fn find(&self, key: &K) -> Option<CountedHandle<'_>> {
-        let h = self.inner.find(key)?;
+    pub fn find<Q>(&self, q: &Q) -> Option<CountedHandle<'_>>
+    where
+        K: core::borrow::Borrow<Q>,
+        Q: ?Sized + core::hash::Hash + Eq,
+    {
+        let h = self.inner.find(q)?;
         let t = self.inner.handle_value(h)?.refcount.get();
         Some(CountedHandle {
             handle: h,
