@@ -17,8 +17,6 @@ Why the type system helps
 Unwinding and Drop panics
 - Panicking in Token::drop during another unwind aborts. Tokens are internal implementation details, so this fail-fast behavior is acceptable and desired for our use case.
 
- 
-
 API Sketch
 ```rust
 use core::marker::PhantomData;
@@ -59,6 +57,11 @@ pub trait Count {
 
 Moving a Token out in Drop
 - To avoid branches and keep zero-sized storage, store tokens in `core::mem::ManuallyDrop<Token<...>>` and extract them in `Drop` with `ManuallyDrop::take`. This avoids constructing throwaway tokens and keeps the path branch-free.
+
+Owned-token pattern (no ManuallyDrop)
+- When a function owns the token and can consume it by value (i.e., not in a `Drop` impl), prefer moving the token directly into `Count::put` without `ManuallyDrop`.
+- Example: `CountedHandle` owns `Token<'_, UsizeCount>`. `CountedHashMap::put(self, handle)` consumes `handle`, moves out `handle.token` by value, and calls `entry.refcount.put(token)`. Because the token is owned and consumed in this path, there is no need for `ManuallyDrop`.
+- This pattern relies on structuring APIs so that token consumption happens in an owned context (e.g., methods that take `self` or consume a handle) rather than inside `Drop`, where only `&mut self` is available.
 
 Generic holder pattern
 ```rust
@@ -199,6 +202,7 @@ impl<T> Count for RcCount<T> {
 
     #[inline]
     fn get(&self) -> Self::Token<'_> {
+        // Debug-only liveness check: there must be at least one strong count
         debug_assert!(self.weak.strong_count() > 0);
         unsafe { std::rc::Rc::increment_strong_count(self.ptr) };
         Token::new()
@@ -206,6 +210,8 @@ impl<T> Count for RcCount<T> {
 
     #[inline]
     fn put<'a>(&'a self, t: Self::Token<'a>) -> bool {
+        // Debug-only liveness check mirrors `get`.
+        debug_assert!(self.weak.strong_count() > 0);
         // Observe the count before decrement; after decrement the allocation may be freed.
         let was_one = self.weak.strong_count() == 1;
         unsafe { std::rc::Rc::decrement_strong_count(self.ptr) };
@@ -256,6 +262,7 @@ Notes on practical struct layout
 - Observing zero: For `UsizeCount::put` we return a bool indicating whether the count reached zero. The map uses this to decide whether to unlink and drop the entry immediately. `RcCount::put` returns true iff the strong count was 1 before the decrement (single-threaded assumption and typically false if the map also holds a strong `Rc`).
 - No shared mutation or threading: This design is single-threaded. `UsizeCount` is not `Sync`, and `RcCount` inherits `Rc`’s `!Send + !Sync` semantics.
 - Overflow behavior (same as Rc): `UsizeCount::get` performs `wrapping_add(1)`, stores it, then aborts the process if the result is 0. This mirrors `Rc`’s strong-count increment semantics and avoids continuing after overflow.
+ - Debug-only behavior: `RcCount::{get,put}` include debug assertions on liveness via `Weak::strong_count()`. These checks are compiled out in release builds and have zero cost.
 
  
 

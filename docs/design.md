@@ -7,6 +7,7 @@ Summary
   - CountedHashMap<K, V, S>: wraps HandleHashMap and adds per-entry refcounting (increments on get/clone, decrements on put).
   - RcHashMap<K, V, S>: wraps HandleHashMap and adds a `Ref` handle, which frees the reference when dropped.
 - Constraints: single-threaded, no atomics, no per-entry heap allocations, stable generational keys, O(1) average lookups, unique keys.
+  - Reentrancy: disallowed in HandleHashMap methods (these may observe transiently inconsistent internal state) and allowed elsewhere. Those methods only call user code via `K: Eq/Hash` during probing. After `remove()` returns `(K,V)` and the structure is consistent again, `Drop` for `K`/`V` may reenter the map. A debug-only guard enforces non-reentrancy inside HandleHashMap; upper layers do not use the guard.
 
 Why this split?
 - Localize invariants: each layer has a small, precise contract. We can test and audit them separately.
@@ -37,9 +38,10 @@ Module 1: HandleHashMap
   - Insertion (two-phase): compute hash(key), probe index (Eq) to reject duplicates, reserve capacity in index and storage; then commit by inserting into storage to obtain a slot and linking the slot into the index under the stored hash. On failure, roll back so the map remains unchanged.
   - Lookup: compute hash(key), probe index, compare by Eq. Returns a `Handle`.
   - Removal: remove from index first, then remove the handle's slot from entries and return (K, V).
+  - Reentrancy guard (debug-only): public entry points begin with a guard `let _g = self.reentrancy.enter();`.
 - Safety and consistency
   - remove() guarantees the data structure is consistent (index and storage no longer reference the handle’s slot) before dropping K and V.
-  - All public methods leave the data structure in a consistent state before any user code can run, except K: Hash and K: Eq that are invoked during probing. We document this as a footgun for higher layers: if Eq/Hash have side-effects, they must not reenter this map.
+  - All public methods leave the data structure in a consistent state before any user code can run, except K: Hash and K: Eq that are invoked during probing. Contract: reentrancy into the same map is disallowed from K: Hash and K: Eq.
   - No refcounting or keepalive here; purely structural.
 
 Module 2: CountedHashMap
@@ -55,7 +57,7 @@ Module 2: CountedHashMap
   - contains_key<Q>(&self, q: &Q) -> bool where K: Borrow<Q>, Q: ?Sized + Hash + Eq
     - Probes using the index without incrementing refcounts.
   - put(&self, handle: CountedHandle<'_>) -> PutResult
-    - Consumes `handle`, moves out its token and returns it to the entry’s `UsizeCount`. If it reaches 0, removes the slot from the underlying `HandleHashMap` and returns `PutResult::Removed { key: K, value: V }`. Otherwise returns `PutResult::Live`.
+    - Consumes `handle`, moves its owned token by value and returns it to the entry’s `UsizeCount` (`UsizeCount::put(token)`). If it reaches 0, removes the slot from the underlying `HandleHashMap` and returns `PutResult::Removed { key: K, value: V }`. Otherwise returns `PutResult::Live`.
   - get(&self, handle: &CountedHandle<'_>) -> CountedHandle<'_>
     - Clones by minting another token from the same entry’s `UsizeCount`; overflow/panic behavior is defined by `UsizeCount` (see tokens.md).
   - len(&self) -> usize; is_empty(&self) -> bool
@@ -115,8 +117,11 @@ Module 3: RcHashMap
       - `&mut RcHashMap` for `value_mut` guarantees exclusive access to the entire map during the mutable reference, ruling out other reads/writes and preserving “only one `&mut`” semantics.
     - Together, these borrows (to `Ref` and to the map) encode: “the entry stays alive” and “no conflicting aliasing or structural mutation occurs” for the lifetime of the returned reference.
   - Iteration:
-    - `iter(&self) -> impl Iterator<Item = (Ref<K,V,S>, &K, &V)>` (creates a `Ref` per entry).
-    - `iter_mut(&mut self) -> impl Iterator<Item = (Ref<K,V,S>, &K, &mut V)>`.
+    - `iter(&self) -> impl Iterator<Item = Ref<'_, K, V, S>>`
+      - Returns a `Ref` per entry. Access key/value via the regular `Ref` accessors which require a shared `&RcHashMap` borrow. This avoids yielding naked references whose lifetimes could outlive the refcount guard.
+    - `iter_mut(&mut self) -> impl Iterator<Item = ItemGuardMut<'_, K, V, S>>`
+      - Yields an RAII guard that holds the `Ref` plus `&K` and `&mut V` for the entry. Because `iter_mut` holds `&mut self`, the map cannot be shared to call `Ref` accessors; the guard provides direct access instead.
+      - On `Drop`, the guard returns its per-entry token to decrement the refcount, mirroring `CountedHashMap`’s guard semantics.
 
 Correctness and footguns
 - The only user code that can run while the structure is not yet consistent is `K: Hash` and `K: Eq` during probing. These must not reenter the map or cause observable aliasing.
@@ -174,7 +179,7 @@ struct RcVal<'m, K, V, S> {
 struct Inner<K, V, S> {
     counted: CountedHashMap<K, RcVal<'static, K, V, S>, S>, // lifetime elided in sketch
     keepalive: RcCount<Inner<K,V,S>>,
-    // plus interior mutability guards/markers to keep !Send + !Sync
+    // !Send + !Sync markers
 }
 struct Ref<'a, K, V, S> {
     ch: CountedHandle<'a>,
@@ -214,10 +219,10 @@ impl<'a, K, V, S> Ref<'a, K, V, S> {
     fn value<'a>(&'a self, map: &'a RcHashMap<K,V,S>) -> Result<&'a V, WrongMap> { /* owner check, then read */ }
     fn value_mut<'a>(&'a self, map: &'a mut RcHashMap<K,V,S>) -> Result<&'a mut V, WrongMap> { /* owner check, then write */ }
     fn drop(&mut self) {
-        match unsafe { self.owner.as_ref() }.counted.put(/* self.ch */) {
+        let inner = unsafe { self.owner.as_ref() };
+        match inner.counted.put(/* self.ch */) {
             PutResult::Live => {}
             PutResult::Removed { key, val } => {
-                let inner = unsafe { self.owner.as_ref() };
                 // Drop user data first while keepalive still holds Inner alive
                 drop(key);
                 let mut wrapped = val;
@@ -234,6 +239,11 @@ impl<'a, K, V, S> Ref<'a, K, V, S> {
 Value keepalive via Tokens (Module 3)
 - Each stored value (wrapped in `RcVal`) holds a token minted from `Inner.keepalive` for as long as the entry is live. This keeps the `Inner` allocation alive across map drops and until the last entry is removed.
 - On final removal, after unlinking and dropping `K` and the user’s `V`, RcHashMap moves the token out (stored in `ManuallyDrop`) and returns it to `keepalive`.
+- Exact final-removal order: (1) decrement entry refcount; (2) if non-zero, return; (3) unlink and remove storage slot; (4) drop `K`; (5) drop user `V` while the keepalive token is still held; (6) move the keepalive token out and return it to `keepalive`; (7) return without touching `Inner` again.
+
+Interior mutability and reentrancy
+- HandleHashMap employs an internal exclusive-access discipline and a debug-only reentrancy guard at the start of each method to prevent nested entry while its internal state can be transiently inconsistent. These methods only invoke user code via `K: Eq/Hash` during probing.
+- Upper layers (CountedHashMap, RcHashMap) do not use the guard. They rely on HandleHashMap to provide consistent operations. After `HandleHashMap::remove` returns `(K,V)`, the structure is consistent again; `Drop` for `K`/`V` may reenter the map safely.
 
 Testing plan
 - HandleHashMap
@@ -255,6 +265,7 @@ Testing plan
   - Owner identity and staleness: wrong-map `Ref` is rejected by accessors via owner-pointer check and returns `Err(WrongMap)`; `Eq`/`Hash` include `(owner_ptr, handle)`. Reference counting prevents stale `Ref`s: an entry cannot be physically removed (and its slot reused) while any `Ref` to it exists; we do not rely on SlotMap generations for `Ref` validity. Invariant: no external constructor for `Ref`; each `Ref` implies an associated per-entry strong count.
   - Unique keys enforced: `insert` fails on duplicate.
   - `len`/`is_empty` proxy to Module 2 and stay consistent across insert/get/put sequences.
+  - Reentrancy guard: in debug builds, nested entry during critical sections panics. Add tests that attempt nested `insert/find` from within `Eq` (guarded) and assert the guard triggers; and tests that reenter from `Drop` of `K`/`V` after unlink (unguarded) and assert no panic occurs. In release builds, the guard is compiled out and has zero overhead.
 
 Notes and non-goals
 - Still single-threaded; no Send/Sync. Enforced via auto-trait negation using `PhantomData<*mut ()>` on `Ref` (and interior mutability in `Inner`).
@@ -263,6 +274,7 @@ Notes and non-goals
 - Unique-keys policy enforced in Module 1: `insert` fails on duplicate; RcHashMap relies on this behavior.
 - Not `Clone`: RcHashMap intentionally does not implement `Clone`. Refs are tied to a specific map instance.
 - Key immutability: there is no `key_mut`; mutating a key would break the index’s invariants. `value_mut` cannot change `K`.
+ - Public visibility: Only `RcHashMap` and its `Ref` are public. `HandleHashMap` and `CountedHashMap` are implementation details and not part of the public API.
 
 Overflow semantics
 - We assume practical refcount overflow is unrealistic; overflow of reference counts is considered undefined behavior, consistent with `Rc` semantics. We document the assumption that there will be fewer than `usize::MAX` references to any entry. No runtime overflow checks are performed.
