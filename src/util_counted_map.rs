@@ -2,6 +2,8 @@
 
 use crate::tokens::{Count, Token, UsizeCount};
 use crate::util_handle_map::{Handle, HandleHashMap, InsertError};
+use core::mem::ManuallyDrop;
+use core::ops::{Deref, DerefMut};
 
 #[derive(Debug)]
 pub struct Counted<V> {
@@ -22,10 +24,38 @@ pub struct CountedHashMap<K, V, S = std::collections::hash_map::RandomState> {
     pub(crate) inner: HandleHashMap<K, Counted<V>, S>,
 }
 
-/// Lifetime-bound counted handle carrying a linear token tied to the entry counter.
+/// Counted handle carrying a linear token tied to the entry counter.
 pub struct CountedHandle<'a> {
     pub(crate) handle: Handle,
-    pub(crate) token: Token<'a, UsizeCount>,
+    pub(crate) token: ManuallyDrop<Token<'a, UsizeCount>>, // ZST, disarmed on Drop
+}
+
+impl<'a> CountedHandle<'a> {
+    pub fn key_ref<'m, K, V, S>(&self, map: &'m CountedHashMap<K, V, S>) -> Option<&'m K>
+    where
+        K: Eq + core::hash::Hash,
+        S: core::hash::BuildHasher + Clone + Default,
+    {
+        map.inner.handle_key(self.handle)
+    }
+
+    pub fn value_ref<'m, K, V, S>(&self, map: &'m CountedHashMap<K, V, S>) -> Option<&'m V>
+    where
+        K: Eq + core::hash::Hash,
+        S: core::hash::BuildHasher + Clone + Default,
+    {
+        map.inner.handle_value(self.handle).map(|c| &c.value)
+    }
+
+    pub fn value_mut<'m, K, V, S>(&self, map: &'m mut CountedHashMap<K, V, S>) -> Option<&'m mut V>
+    where
+        K: Eq + core::hash::Hash,
+        S: core::hash::BuildHasher + Clone + Default,
+    {
+        map.inner
+            .handle_value_mut(self.handle)
+            .map(|c| &mut c.value)
+    }
 }
 
 /// Result of returning a token; indicates whether the entry was removed.
@@ -66,9 +96,10 @@ where
     pub fn find(&self, key: &K) -> Option<CountedHandle<'_>> {
         let h = self.inner.find(key)?;
         let t = self.inner.handle_value(h)?.refcount.get();
+        let t_static: Token<'static, UsizeCount> = unsafe { core::mem::transmute(t) };
         Some(CountedHandle {
             handle: h,
-            token: t,
+            token: ManuallyDrop::new(t_static),
         })
     }
 
@@ -80,25 +111,21 @@ where
         self.inner.contains_key(q)
     }
 
-    pub fn get_value(&self, h: Handle) -> Option<&V> {
-        self.inner.handle_value(h).map(|c| &c.value)
-    }
-    pub fn get_value_mut(&mut self, h: Handle) -> Option<&mut V> {
-        self.inner.handle_value_mut(h).map(|c| &mut c.value)
-    }
-
     /// Insert a new key -> value and mint a token for the returned handle.
     pub fn insert(&mut self, key: K, value: V) -> Result<CountedHandle<'_>, InsertError> {
-        let h = self.inner.insert(key, Counted::new(value, 0))?;
-        let t = self
+        // First, insert the entry so the counter lives in the map.
+        let handle = self.inner.insert(key, Counted::new(value, 0))?;
+        // Then mint a token from the stored counter to return.
+        let token = self
             .inner
-            .handle_value(h)
-            .expect("just inserted")
+            .handle_value(handle)
+            .expect("handle must be valid immediately after insert")
             .refcount
             .get();
+        let t_static: Token<'static, UsizeCount> = unsafe { core::mem::transmute(token) };
         Ok(CountedHandle {
-            handle: h,
-            token: t,
+            handle,
+            token: ManuallyDrop::new(t_static),
         })
     }
 
@@ -110,16 +137,19 @@ where
             .expect("handle must be valid while counted handle is live")
             .refcount
             .get();
+        let t_static: Token<'static, UsizeCount> = unsafe { core::mem::transmute(t) };
         CountedHandle {
             handle: h.handle,
-            token: t,
+            token: ManuallyDrop::new(t_static),
         }
     }
 
     /// Return a token for an entry; removes and returns (K, V) when count hits zero.
-    pub fn put(&mut self, h: CountedHandle<'_>) -> PutResult<K, V> {
+    pub fn put(&mut self, mut h: CountedHandle<'_>) -> PutResult<K, V> {
         if let Some(entry) = self.inner.handle_value(h.handle) {
-            let now_zero = entry.refcount.put(h.token);
+            let tok: Token<'static, UsizeCount> =
+                unsafe { core::mem::transmute(ManuallyDrop::take(&mut h.token)) };
+            let now_zero = entry.refcount.put(tok);
             if now_zero {
                 let (k, v) = self
                     .inner
@@ -133,10 +163,120 @@ where
             PutResult::Live
         } else {
             // Stale handle; treat as live. Disarm token drop to avoid panic.
-            core::mem::forget(h.token);
+            let tok = unsafe { ManuallyDrop::take(&mut h.token) };
+            core::mem::forget(tok);
             PutResult::Live
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = ItemGuard<'_, K, V>> {
+        self.inner.iter().map(|(h, k, c)| ItemGuard {
+            handle: h,
+            key: k,
+            value: &c.value,
+            counter: &c.refcount,
+            token: Some(c.refcount.get()),
+        })
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = ItemGuardMut<'_, K, V>> {
+        self.inner.iter_mut().map(|(h, k, c)| {
+            let Counted { refcount, value } = c;
+            ItemGuardMut {
+                handle: h,
+                key: k,
+                value,
+                counter: refcount,
+                token: Some(refcount.get()),
+            }
+        })
+    }
+}
+
+/// Read-only item guard yielded by `iter()`.
+pub struct ItemGuard<'a, K, V> {
+    handle: Handle,
+    key: &'a K,
+    value: &'a V,
+    counter: &'a UsizeCount,
+    token: Option<Token<'a, UsizeCount>>, // consumed on Drop
+}
+
+impl<'a, K, V> ItemGuard<'a, K, V> {
+    pub fn handle(&self) -> CountedHandle<'a> {
+        let t = self.counter.get();
+        let t_static: Token<'static, UsizeCount> = unsafe { core::mem::transmute(t) };
+        CountedHandle {
+            handle: self.handle,
+            token: ManuallyDrop::new(t_static),
+        }
+    }
+    pub fn key(&self) -> &'a K {
+        self.key
+    }
+    pub fn value(&self) -> &'a V {
+        self.value
+    }
+}
+
+impl<'a, K, V> Deref for ItemGuard<'a, K, V> {
+    type Target = V;
+    fn deref(&self) -> &Self::Target {
+        self.value
+    }
+}
+
+impl<'a, K, V> Drop for ItemGuard<'a, K, V> {
+    fn drop(&mut self) {
+        if let Some(t) = self.token.take() {
+            let _ = self.counter.put(t);
         }
     }
 }
 
-// No unit tests here; exercised via higher-level RcHashMap tests.
+/// Mutable item guard yielded by `iter_mut()`.
+pub struct ItemGuardMut<'a, K, V> {
+    handle: Handle,
+    key: &'a K,
+    value: &'a mut V,
+    counter: &'a UsizeCount,
+    token: Option<Token<'a, UsizeCount>>, // consumed on Drop
+}
+
+impl<'a, K, V> ItemGuardMut<'a, K, V> {
+    pub fn handle(&self) -> CountedHandle<'a> {
+        let t = self.counter.get();
+        let t_static: Token<'static, UsizeCount> = unsafe { core::mem::transmute(t) };
+        CountedHandle {
+            handle: self.handle,
+            token: ManuallyDrop::new(t_static),
+        }
+    }
+    pub fn key(&self) -> &'a K {
+        self.key
+    }
+    pub fn value_mut(&mut self) -> &mut V {
+        self.value
+    }
+}
+
+impl<'a, K, V> Deref for ItemGuardMut<'a, K, V> {
+    type Target = V;
+    fn deref(&self) -> &Self::Target {
+        self.value
+    }
+}
+
+impl<'a, K, V> DerefMut for ItemGuardMut<'a, K, V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.value
+    }
+}
+
+impl<'a, K, V> Drop for ItemGuardMut<'a, K, V> {
+    fn drop(&mut self) {
+        if let Some(t) = self.token.take() {
+            let _ = self.counter.put(t);
+        }
+    }
+}

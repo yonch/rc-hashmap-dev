@@ -11,14 +11,18 @@ use std::rc::{Rc, Weak};
 
 /// Zero-sized, linear token tied to its originating counter via lifetime.
 pub struct Token<'a, C: ?Sized> {
-    _marker: PhantomData<&'a C>,
+    // Lifetime is tracked separately from the counter type to avoid
+    // imposing `'a` bounds on `C` (useful for generic counters).
+    _lt: PhantomData<&'a ()>,
+    _ctr: PhantomData<*const C>,
 }
 
 impl<'a, C: ?Sized> Token<'a, C> {
     #[inline]
     pub(crate) fn new() -> Self {
         Self {
-            _marker: PhantomData,
+            _lt: PhantomData,
+            _ctr: PhantomData,
         }
     }
 }
