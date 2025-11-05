@@ -42,7 +42,11 @@ pub trait Count {
         Self: 'a;
 
     /// Acquire one counted reference and return a linear token for it.
-    fn get(&self) -> Self::Token<'_>;
+    ///
+    /// We mint tokens with a 'static lifetime parameter. The token itself is
+    /// still branded to this counter via its type parameter, and can be
+    /// covariantly shortened when returning it via `put`.
+    fn get(&self) -> Self::Token<'static>;
 
     /// Return (consume) a previously acquired token.
     /// Returns true if the count is now zero.
@@ -70,7 +74,7 @@ impl Count for UsizeCount {
         Self: 'a;
 
     #[inline]
-    fn get(&self) -> Self::Token<'_> {
+    fn get(&self) -> Self::Token<'static> {
         let c = self.count.get();
         let n = c.wrapping_add(1);
         self.count.set(n);
@@ -78,7 +82,7 @@ impl Count for UsizeCount {
             // Follow Rc semantics: abort on overflow rather than continue unsafely.
             std::process::abort();
         }
-        Token::new()
+        Token::<'static, Self>::new()
     }
 
     #[inline]
@@ -112,17 +116,17 @@ impl<T> RcCount<T> {
     }
 }
 
-impl<T> Count for RcCount<T> {
+impl<T: 'static> Count for RcCount<T> {
     type Token<'a>
         = Token<'a, Self>
     where
         Self: 'a;
 
     #[inline]
-    fn get(&self) -> Self::Token<'_> {
+    fn get(&self) -> Self::Token<'static> {
         debug_assert!(self.weak.strong_count() > 0);
         unsafe { Rc::increment_strong_count(self.ptr) };
-        Token::new()
+        Token::<'static, Self>::new()
     }
 
     #[inline]
