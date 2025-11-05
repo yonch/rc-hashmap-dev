@@ -21,3 +21,8 @@ mod util_handle_map;
 // Public surface
 pub use rc_map::{RcHashMap, Ref};
 pub use util_handle_map::InsertError;
+
+// Optional: expose the internal HandleHashMap to criterion benches when requested.
+// This keeps the public API surface clean by default.
+#[cfg(feature = "bench_internal")]
+pub use util_handle_map::HandleHashMap;
