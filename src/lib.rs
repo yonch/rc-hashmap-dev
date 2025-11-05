@@ -1,14 +1,23 @@
-//! rc-hashmap: A hashmap with reference-counted key-value entries.
+//! rc-hashmap: A single-threaded, handle-based map with Rc-like
+//! references to entries that allow fast access and cleanup on drop.
 //!
-//! This crate is currently a placeholder. The data structure and API
-//! will be implemented in future versions.
+//! This crate provides three internal layers built to keep invariants
+//! simple and auditable:
+//! - HandleHashMap: structural map with stable handles and a debug-only
+//!   reentrancy guard to keep internals consistent during operations.
+//! - CountedHashMap: adds a per-entry reference count.
+//! - RcHashMap: public API that exposes `Ref` handles with Rc-like
+//!   clone/drop semantics.
 //!
-//! Helper type `ManualRc<T>` encapsulates the raw-pointer based use of
-//! `std::rc::Rc` increment/decrement APIs, and is intended to be used by
-//! the final Rc-backed map layer.
+//! The internal `RcCount<T>` helper (in `tokens`) encapsulates the
+//! raw-pointer based use of `std::rc::Rc` increment/decrement APIs.
 
-mod manual_rc;
 mod reentrancy;
+mod tokens;
+mod util_handle_map;
+mod util_counted_map;
+mod rc_map;
 
-pub use manual_rc::ManualRc;
-pub use reentrancy::{DebugReentrancy, ReentrancyGuard};
+// Public surface
+pub use rc_map::{RcHashMap, Ref};
+pub use util_handle_map::InsertError;
