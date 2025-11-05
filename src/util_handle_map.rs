@@ -101,12 +101,17 @@ where
         self.slots.is_empty()
     }
 
-    pub fn find(&self, key: &K) -> Option<Handle> {
+    pub fn find<Q>(&self, q: &Q) -> Option<Handle>
+    where
+        K: Borrow<Q>,
+        Q: ?Sized + Hash + Eq,
+    {
         let _g = self.reentrancy.enter();
-        let hash = self.make_hash(key);
-        if let Some(&k) = self.index.get(hash, |&k| {
-            self.slots.get(k).map(|e| &e.key == key).unwrap_or(false)
-        }) {
+        let hash = self.make_hash(q);
+        if let Some(&k) = self
+            .index
+            .get(hash, |&k| self.slots.get(k).map(|e| e.key.borrow() == q).unwrap_or(false))
+        {
             return Some(Handle::new(k));
         }
         None
@@ -256,6 +261,10 @@ mod tests {
         m.insert("hello".to_string(), 1).unwrap();
         assert!(m.contains_key("hello"));
         assert!(!m.contains_key("world"));
+
+        // Also validate borrowed find
+        assert!(m.find("hello").is_some());
+        assert!(m.find("world").is_none());
     }
 
     /// Invariant: Handle-based access yields references while the entry exists and

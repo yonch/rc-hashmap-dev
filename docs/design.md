@@ -22,7 +22,7 @@ Module 1: HandleHashMap
   - hash: u64 — precomputed with the map’s BuildHasher.
 - API (sketch)
   - new(hasher: S) -> Self
-  - find(&self, key: &K) -> Option<Handle>
+  - find<Q>(&self, q: &Q) -> Option<Handle> where K: Borrow<Q>, Q: ?Sized + Hash + Eq
   - contains_key<Q>(&self, q: &Q) -> bool where K: Borrow<Q>, Q: ?Sized + Hash + Eq
   - insert(&mut self, key: K, value: V) -> Result<Handle, InsertError>
   - remove(&mut self, handle: Handle) -> Option<(K, V)>
@@ -50,13 +50,13 @@ Module 2: CountedHashMap
   - Wrap values as Counted<V> = { refcount: UsizeCount, value: V }.
   - Internally: HandleHashMap<K, Counted<V>, S>.
 - API (same surface, plus helpers)
-  - find(&self, key: &K) -> Option<CountedHandle<'_>>
+  - find<Q>(&self, q: &Q) -> Option<CountedHandle<'_>> where K: Borrow<Q>, Q: ?Sized + Hash + Eq
     - If found, mints a token from the entry’s `UsizeCount` and returns a `CountedHandle<'_>` carrying that token (lifetime-bound to the counter value). The handle stores the Module 1 `Handle`.
   - insert(&mut self, key: K, value: V) -> Result<CountedHandle<'_>, InsertError>
     - Delegates to HandleHashMap’s unique insertion. On success, initializes refcount by minting and returning a token in the resulting handle. On failure, no token is minted and the map is unchanged.
   - contains_key<Q>(&self, q: &Q) -> bool where K: Borrow<Q>, Q: ?Sized + Hash + Eq
     - Probes using the index without incrementing refcounts.
-  - put(&self, handle: CountedHandle<'_>) -> PutResult
+  - put(&mut self, handle: CountedHandle<'_>) -> PutResult
     - Consumes `handle`, moves its owned token by value and returns it to the entry’s `UsizeCount` (`UsizeCount::put(token)`). If it reaches 0, removes the slot from the underlying `HandleHashMap` and returns `PutResult::Removed { key: K, value: V }`. Otherwise returns `PutResult::Live`.
   - get(&self, handle: &CountedHandle<'_>) -> CountedHandle<'_>
     - Clones by minting another token from the same entry’s `UsizeCount`; overflow/panic behavior is defined by `UsizeCount` (see tokens.md).
