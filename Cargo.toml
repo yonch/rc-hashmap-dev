@@ -15,3 +15,19 @@ path = "src/lib.rs"
 [dependencies]
 slotmap = "1"
 hashbrown = { version = "0.14", features = ["raw"] }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[features]
+# Internal benchmarking hook: exposes HandleHashMap for benches only.
+bench_internal = []
+
+[[bench]]
+name = "rc_hashmap_bench"
+harness = false
+
+[[bench]]
+name = "handle_hashmap_bench"
+harness = false
+required-features = ["bench_internal"]
