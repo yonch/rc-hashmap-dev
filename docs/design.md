@@ -51,7 +51,7 @@ Module 2: CountedHashMap
   - find(&self, key: &K) -> Option<CountedHandle<'_>>
     - If found, mints a token from the entry’s `UsizeCount` and returns a `CountedHandle<'_>` carrying that token (lifetime-bound to the counter value). The handle stores the Module 1 `Handle`.
   - insert(&mut self, key: K, value: V) -> Result<CountedHandle<'_>, InsertError>
-    - Delegates to HandleHashMap’s unique insertion. On success, initializes refcount by minting and returning a token in the resulting handle.
+    - Delegates to HandleHashMap’s unique insertion. On success, initializes refcount by minting and returning a token in the resulting handle. On failure, no token is minted and the map is unchanged.
   - contains_key<Q>(&self, q: &Q) -> bool where K: Borrow<Q>, Q: ?Sized + Hash + Eq
     - Probes using the index without incrementing refcounts.
   - put(&self, handle: CountedHandle<'_>) -> PutResult
@@ -80,6 +80,7 @@ Module 3: RcHashMap
 - Keepalive model (via RcCount + Tokens)
   - `Inner` holds an `RcCount<Inner>` created from the map’s `Rc<Inner>` at construction time. It exposes `get()`/`put()` via the `Count` trait and returns linear Tokens (see tokens.md).
   - Each live entry contributes one additional strong count: on successful insertion, mint a token from `Inner.keepalive` and store it inside the stored value (Module 3 wraps the user value with a keepalive token). On final removal (when the entry’s `refcount` reaches 0 and the slot is removed), move this token out and return it to `keepalive`.
+  - Insert failure cleanup: if insertion fails (e.g., duplicate key), return the keepalive token before returning `Err`, so no extra strong counts leak.
   - Dropping RcHashMap drops its own `Rc` handle; if entries still exist, their per-entry keepalive tokens keep `Inner` alive until those entries are removed.
   - Final removal order and rationale: drop `K` and `V` first while `Inner` remains alive (kept by the per-entry keepalive token), then return the token via `keepalive.put(token)`. This preserves safety if user `Drop` for `K`/`V` reenters the map.
   - Length as an invariant aid: all three layers expose `len()`/`is_empty()`. Although Rc-based keepalive does not require checking `len()==0` to trigger deallocation, `len()==0` on `CountedHashMap` precisely indicates “no live entries remain”, which is useful for assertions and tests around last-entry removal.
@@ -185,10 +186,17 @@ impl<K, V, S> RcHashMap<K, V, S> {
     fn insert(&mut self, k: K, v: V) -> Result<Ref<'_,K,V,S>, InsertError> {
         // Mint keepalive token and wrap the user value with it.
         let t = self.inner.keepalive.get();
-        let wrapped = RcVal { value: v, owner_token: core::mem::ManuallyDrop::new(t) };
-        // Insert wrapped value; get a CountedHandle carrying an entry-ref token.
-        let ch = self.inner.counted.insert(k, wrapped)?;
-        Ok(Ref { ch, owner: /* NonNull::from(self.inner.as_ref()) */, _nosend: PhantomData })
+        let mut wrapped = RcVal { value: v, owner_token: core::mem::ManuallyDrop::new(t) };
+        // Try to insert wrapped value; on failure, return the keepalive token before bubbling the error.
+        match self.inner.counted.insert(k, wrapped) {
+            Ok(ch) => Ok(Ref { ch, owner: /* NonNull::from(self.inner.as_ref()) */, _nosend: PhantomData }),
+            Err(e) => {
+                // Take back and return the keepalive token to avoid leaking a strong count.
+                let tok = unsafe { core::mem::ManuallyDrop::take(&mut wrapped.owner_token) };
+                let _ = self.inner.keepalive.put(tok);
+                Err(e)
+            }
+        }
     }
     fn find<Q>(&self, q: &Q) -> Option<Ref<'_,K,V,S>> where K: Borrow<Q>, Q: ?Sized + Hash + Eq {
         self.inner.counted.find(q).map(|ch| Ref { ch, owner: /* NonNull::from(self.inner.as_ref()) */, _nosend: PhantomData })
@@ -238,10 +246,12 @@ Testing plan
   - Overflow behavior for refcount increments is unchecked (UB), consistent with `Rc`.
   - value/value_mut observe the same handle identity across increments.
   - `len`/`is_empty` reflect the number of live entries (refcount >= 1); removal at zero decreases `len`.
+  - Duplicate insert returns `Err` and does not mint a token; refcounts and `len` remain unchanged.
 - RcHashMap
   - `Ref::clone` increments per-entry count; `Ref::drop` decrements and removes at zero.
   - Rc-based keepalive via tokens: map drop with live entries leaves `Inner` alive via per-entry keepalive tokens stored in values; final removal of last entry frees `Inner` when the value’s token is returned.
   - Removal path drops `K`/user `V` before returning the keepalive token to `inner.keepalive`.
+  - Duplicate insert returns `Err` and returns the keepalive token before erroring; `Rc<Inner>` strong count remains correct.
   - Owner identity and staleness: wrong-map `Ref` is rejected by accessors via owner-pointer check and returns `Err(WrongMap)`; `Eq`/`Hash` include `(owner_ptr, handle)`. Reference counting prevents stale `Ref`s: an entry cannot be physically removed (and its slot reused) while any `Ref` to it exists; we do not rely on SlotMap generations for `Ref` validity. Invariant: no external constructor for `Ref`; each `Ref` implies an associated per-entry strong count.
   - Unique keys enforced: `insert` fails on duplicate.
   - `len`/`is_empty` proxy to Module 2 and stay consistent across insert/get/put sequences.
