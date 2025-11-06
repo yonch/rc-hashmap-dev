@@ -73,24 +73,17 @@ where
     pub fn insert(&mut self, key: K, value: V) -> Result<Ref<K, V, S>, InsertError> {
         let out = {
             let mut map = self.inner.map.borrow_mut();
-            if map.contains_key(&key) {
-                return Err(InsertError::DuplicateKey);
-            }
-            // Acquire keepalive token upfront; safe because we've checked duplicates.
-            let token = self.inner.keepalive.get();
-            let wrapped = RcVal {
+            let res = map.insert_with(key, || RcVal {
                 value,
-                keepalive_token: token,
-            };
-            let ch = match map.insert(key, wrapped) {
-                Ok(ch) => ch,
-                Err(e) => {
-                    // Should not happen after contains_key check; no way to recover the token here.
-                    return Err(e);
+                keepalive_token: self.inner.keepalive.get(),
+            });
+            match res {
+                Ok(ch) => {
+                    let ch_static: CountedHandle<'static> = unsafe { core::mem::transmute(ch) };
+                    Ok(Ref::new(NonNull::from(self.inner.as_ref()), ch_static))
                 }
-            };
-            let ch_static: CountedHandle<'static> = unsafe { core::mem::transmute(ch) };
-            Ok(Ref::new(NonNull::from(self.inner.as_ref()), ch_static))
+                Err(e) => Err(e),
+            }
         };
         out
     }
