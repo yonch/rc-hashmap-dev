@@ -21,13 +21,12 @@ proptest! {
                         Err(rc_hashmap::InsertError::DuplicateKey) => {},
                     }
                 }
-                // Get returns a new Ref if present
+                // Find returns a new Ref if present
                 1 => {
-                    if let Some(r) = m.get(&key) {
+                    if let Some(r) = m.find(&key) {
                         // Check value path when present
-                        if let Some(v) = r.value() {
-                            prop_assert_eq!(*v, k as i32);
-                        }
+                        let v = r.value(&m).unwrap();
+                        prop_assert_eq!(*v, k as i32);
                         live[k].push(r);
                     }
                 }

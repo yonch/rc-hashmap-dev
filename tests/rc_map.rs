@@ -9,9 +9,9 @@ fn insert_get_clone_drop_removes() {
     assert_eq!(m.len(), 1);
     assert!(m.contains_key(&"k1".to_string()));
 
-    // get returns a new Ref and increments the count
-    let g = m.get(&"k1".to_string()).expect("found");
-    assert_eq!(*g.value().expect("value borrow"), 42);
+    // find returns a new Ref and increments the count
+    let g = m.find(&"k1".to_string()).expect("found");
+    assert_eq!(*g.value(&m).expect("value borrow"), 42);
 
     // clone keeps entry alive
     let g2 = g.clone();
@@ -67,13 +67,13 @@ fn wrong_map_accessors_reject() {
     let r = m1.insert("a".to_string(), 11).unwrap();
 
     // Owner-checked accessors
-    assert!(r.value_in(&m1).is_ok());
-    assert!(r.key_in(&m1).is_ok());
-    assert!(r.value_mut_in(&mut m1).is_ok());
+    assert!(r.value(&m1).is_ok());
+    assert!(r.key(&m1).is_ok());
+    assert!(r.value_mut(&mut m1).is_ok());
 
     // Wrong map should be rejected
-    assert!(r.value_in(&m2).is_err());
-    assert!(r.key_in(&m2).is_err());
+    assert!(r.value(&m2).is_err());
+    assert!(r.key(&m2).is_err());
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn iter_returns_refs() {
 
     // Values are reachable via returned Refs
     for r in m.iter() {
-        let v = r.value().expect("value borrow");
+        let v = r.value(&m).expect("value borrow");
         assert!(*v == 1 || *v == 2 || *v == 3);
     }
 }
@@ -109,6 +109,6 @@ fn iter_mut_updates_and_allows_cloning_ref() {
     assert_eq!(m.len(), 2);
 
     // Verify values updated using existing Refs to keep tokens alive
-    assert_eq!(*r1.value_in(&m).unwrap(), 11);
-    assert_eq!(*r2.value_in(&m).unwrap(), 12);
+    assert_eq!(*r1.value(&m).unwrap(), 11);
+    assert_eq!(*r2.value(&m).unwrap(), 12);
 }

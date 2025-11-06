@@ -99,10 +99,6 @@ where
         }
     }
 
-    pub fn get(&self, key: &K) -> Option<Ref<K, V, S>> {
-        self.find(key)
-    }
-
     pub fn find<Q>(&self, q: &Q) -> Option<Ref<K, V, S>>
     where
         K: core::borrow::Borrow<Q>,
@@ -172,14 +168,14 @@ where
     }
 
     /// Borrow the entry's key, validating owner identity.
-    pub fn key_in<'a>(&'a self, map: &'a RcHashMap<K, V, S>) -> Result<&'a K, WrongMap> {
+    pub fn key<'a>(&'a self, map: &'a RcHashMap<K, V, S>) -> Result<&'a K, WrongMap> {
         let _ = self.check_owner(map)?;
         let ch = self.handle.as_ref().expect("live ref must have handle");
         ch.key_ref(map.map()).ok_or(WrongMap)
     }
 
     /// Borrow the entry's value, validating owner identity.
-    pub fn value_in<'a>(&'a self, map: &'a RcHashMap<K, V, S>) -> Result<&'a V, WrongMap> {
+    pub fn value<'a>(&'a self, map: &'a RcHashMap<K, V, S>) -> Result<&'a V, WrongMap> {
         let _ = self.check_owner(map)?;
         let ch = self.handle.as_ref().expect("live ref must have handle");
         ch.value_ref(map.map())
@@ -188,7 +184,7 @@ where
     }
 
     /// Mutably borrow the entry's value, validating owner identity.
-    pub fn value_mut_in<'a>(
+    pub fn value_mut<'a>(
         &'a self,
         map: &'a mut RcHashMap<K, V, S>,
     ) -> Result<&'a mut V, WrongMap> {
@@ -201,13 +197,6 @@ where
         ch.value_mut(map.map_mut())
             .map(|rcv| &mut rcv.value)
             .ok_or(WrongMap)
-    }
-
-    pub fn value(&self) -> Option<&V> {
-        let inner = unsafe { self.owner_ptr.as_ref() };
-        let ch = self.handle.as_ref()?;
-        ch.value_ref(unsafe { &*inner.map.get() })
-            .map(|rcv| &rcv.value)
     }
 }
 

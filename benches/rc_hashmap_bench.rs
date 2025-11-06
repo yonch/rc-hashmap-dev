@@ -44,7 +44,7 @@ fn bench_get_hit(c: &mut Criterion) {
         let mut it = keys.iter().cycle();
         b.iter(|| {
             let k = it.next().unwrap();
-            let r = m.get(k).unwrap();
+            let r = m.find(k).unwrap();
             black_box(r);
         })
     });
@@ -60,7 +60,7 @@ fn bench_get_miss(c: &mut Criterion) {
         b.iter(|| {
             // generate keys unlikely in map
             let k = key(miss.next().unwrap());
-            black_box(m.get(&k));
+            black_box(m.find(&k));
         })
     });
 }
