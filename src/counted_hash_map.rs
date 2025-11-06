@@ -225,8 +225,18 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use std::cell::Cell;
+    use std::collections::BTreeSet;
 
-    // Property: For each key, liveness matches whether there exists at least one outstanding handle.
+    // Property-based invariant: for each key, entry liveness in the map
+    // matches whether there exists at least one outstanding `CountedHandle`
+    // for that key.
+    //
+    // Invariants exercised:
+    // - `contains_key(key)` is true iff there is ≥1 outstanding handle for `key`.
+    // - `insert` mints exactly one handle on success; duplicates do not mint.
+    // - `find`/`get` mint one new handle when the key is present.
+    // - `put` decrements the refcount and removes the entry exactly when the
+    //   last handle is returned.
     proptest! {
         #[test]
         fn prop_counted_hashmap_liveness(keys in 1usize..=5, ops in proptest::collection::vec((0u8..=4u8, 0usize..100usize), 1..100)) {
@@ -292,6 +302,10 @@ mod tests {
         }
     }
 
+    /// insert_with is lazy (default closure runs only on insertion) and
+    /// returns a handle with a freshly minted token. On duplicate, the
+    /// default closure must not run and no token is minted. Returning the
+    /// last handle removes the entry and yields the stored `(K, V)`.
     #[test]
     fn insert_with_is_lazy_and_mints_token() {
         use crate::handle_hash_map::InsertError;
@@ -332,6 +346,9 @@ mod tests {
         assert!(!m.contains_key(&"k".to_string()));
     }
 
+    /// Handle-based accessors expose references to the stored value and
+    /// allow in-place mutation through `value_mut`. Mutations persist and
+    /// are reflected in subsequent reads.
     #[test]
     fn insert_with_then_mutate_value() {
         let mut m: CountedHashMap<String, i32> = CountedHashMap::new();
@@ -341,5 +358,225 @@ mod tests {
         }
         assert_eq!(ch.value_ref(&m), Some(&15));
         let _ = m.put(ch);
+    }
+
+    /// `get` clones a counted handle by minting a new token for the same
+    /// entry. Returning one of two handles leaves the entry live; returning
+    /// the last one removes the entry and returns `(K, V)`.
+    #[test]
+    fn get_mints_new_token_and_put_removes_at_zero() {
+        let mut m: CountedHashMap<&'static str, i32> = CountedHashMap::new();
+        let h1 = m.insert("a", 1).unwrap();
+        let h2 = m.get(&h1);
+
+        // Returning one of them leaves the entry live
+        match m.put(h1) {
+            PutResult::Live => {}
+            _ => panic!("expected Live when one handle remains"),
+        }
+        assert!(m.contains_key(&"a"));
+
+        // Returning the last one removes the entry
+        match m.put(h2) {
+            PutResult::Removed { key, value } => {
+                assert_eq!(key, "a");
+                assert_eq!(value, 1);
+            }
+            _ => panic!("expected Removed at zero"),
+        }
+        assert!(!m.contains_key(&"a"));
+    }
+
+    /// `key_ref`/`value_ref` return references tied to the map borrow and
+    /// reflect the current storage; `value_mut` updates persist.
+    #[test]
+    fn key_ref_value_ref_and_mutation_persist() {
+        let mut m: CountedHashMap<String, i32> = CountedHashMap::new();
+        let h = m.insert("k1".to_string(), 10).unwrap();
+        assert_eq!(h.key_ref(&m), Some(&"k1".to_string()));
+        assert_eq!(h.value_ref(&m), Some(&10));
+        if let Some(v) = h.value_mut(&mut m) {
+            *v += 7;
+        }
+        assert_eq!(h.value_ref(&m), Some(&17));
+        let _ = m.put(h);
+    }
+
+    /// Iterators yield each live entry exactly once; `iter_mut` updates are
+    /// visible in subsequent reads.
+    #[test]
+    fn iter_yields_all_entries_once_and_iter_mut_updates_values() {
+        let mut m: CountedHashMap<String, i32> = CountedHashMap::new();
+        let keys = ["k1", "k2", "k3", "k4"];
+        let mut handles = Vec::new();
+        for (i, k) in keys.iter().enumerate() {
+            handles.push(m.insert((*k).to_string(), i as i32).unwrap());
+        }
+
+        // iter yields each live entry exactly once
+        let seen: BTreeSet<String> = m.iter().map(|(_h, k, _v)| k.clone()).collect();
+        let expected: BTreeSet<String> = keys.iter().map(|s| (*s).to_string()).collect();
+        assert_eq!(seen, expected);
+
+        // iter_mut updates are visible in subsequent reads
+        for (_h, _k, v) in m.iter_mut() {
+            *v += 100;
+        }
+        for (i, _k) in keys.iter().enumerate() {
+            let hv = handles[i].value_ref(&m).copied();
+            assert_eq!(hv, Some((i as i32) + 100));
+        }
+
+        // Return the outstanding insert handles to clean up
+        for h in handles {
+            let _ = m.put(h);
+        }
+    }
+
+    /// `iter_raw` mints a `CountedHandle` per entry for scoped work. These
+    /// raw handles keep entries live until explicitly returned to `put`.
+    /// Dropping the original handles while the raw handles are outstanding
+    /// must not remove the entries; returning the raw handles eventually
+    /// removes all entries when the count reaches zero.
+    #[test]
+    fn iter_raw_requires_put_and_keeps_entries_live() {
+        let mut m: CountedHashMap<String, i32> = CountedHashMap::new();
+        // Insert 3 entries and keep their handles
+        let h1 = m.insert("a".to_string(), 1).unwrap();
+        let h2 = m.insert("b".to_string(), 2).unwrap();
+        let h3 = m.insert("c".to_string(), 3).unwrap();
+
+        // Mint one extra handle per entry via iter_raw
+        let mut raw: Vec<CountedHandle<'static>> = m.iter_raw().map(|(ch, _k, _v)| ch).collect();
+
+        // Drop the original handles; entries must remain live due to raw handles
+        match m.put(h1) {
+            PutResult::Live => {}
+            _ => panic!("expected Live"),
+        }
+        match m.put(h2) {
+            PutResult::Live => {}
+            _ => panic!("expected Live"),
+        }
+        match m.put(h3) {
+            PutResult::Live => {}
+            _ => panic!("expected Live"),
+        }
+        assert!(m.contains_key(&"a".to_string()));
+        assert!(m.contains_key(&"b".to_string()));
+        assert!(m.contains_key(&"c".to_string()));
+
+        // Now return all raw handles; each should remove the corresponding entry
+        let mut removed: BTreeSet<String> = BTreeSet::new();
+        while let Some(ch) = raw.pop() {
+            match m.put(ch) {
+                PutResult::Removed { key, value } => {
+                    removed.insert(key.clone());
+                    match key.as_str() {
+                        "a" => assert_eq!(value, 1),
+                        "b" => assert_eq!(value, 2),
+                        "c" => assert_eq!(value, 3),
+                        _ => unreachable!(),
+                    }
+                }
+                PutResult::Live => {}
+            }
+        }
+        assert_eq!(
+            removed,
+            ["a", "b", "c"].into_iter().map(|s| s.to_string()).collect()
+        );
+        assert!(!m.contains_key(&"a".to_string()));
+        assert!(!m.contains_key(&"b".to_string()));
+        assert!(!m.contains_key(&"c".to_string()));
+    }
+
+    /// `iter_mut_raw` behaves like `iter_raw` but yields `&mut V`. Mutations
+    /// applied through these mutable references are persisted. As with
+    /// `iter_raw`, the minted handles must be returned via `put` to allow
+    /// final removal.
+    #[test]
+    fn iter_mut_raw_requires_put_and_keeps_entries_live() {
+        let mut m: CountedHashMap<&'static str, i32> = CountedHashMap::new();
+        let h1 = m.insert("x", 10).unwrap();
+        let h2 = m.insert("y", 20).unwrap();
+
+        // Mint one extra handle per entry via iter_mut_raw and also mutate
+        let mut raw: Vec<CountedHandle<'static>> = m
+            .iter_mut_raw()
+            .map(|(ch, _k, v)| {
+                *v += 1;
+                ch
+            })
+            .collect();
+
+        // Return the original handles; entries remain live due to raw handles
+        assert!(matches!(m.put(h1), PutResult::Live));
+        assert!(matches!(m.put(h2), PutResult::Live));
+        assert!(m.contains_key(&"x"));
+        assert!(m.contains_key(&"y"));
+
+        // Verify mutations persisted
+        let xr = m.find(&"x").unwrap();
+        let yr = m.find(&"y").unwrap();
+        assert_eq!(xr.value_ref(&m), Some(&11));
+        assert_eq!(yr.value_ref(&m), Some(&21));
+        // Return the temporary verification handles
+        let _ = m.put(xr);
+        let _ = m.put(yr);
+
+        // Return raw handles and ensure removals happen
+        let mut removed = 0;
+        while let Some(ch) = raw.pop() {
+            match m.put(ch) {
+                PutResult::Removed { key, value } => {
+                    removed += 1;
+                    match key {
+                        "x" => assert_eq!(value, 11),
+                        "y" => assert_eq!(value, 21),
+                        _ => unreachable!(),
+                    }
+                }
+                PutResult::Live => {}
+            }
+        }
+        assert_eq!(removed, 2);
+        assert!(!m.contains_key(&"x"));
+        assert!(!m.contains_key(&"y"));
+    }
+
+    /// Negative behavior: dropping a `CountedHandle` without calling `put`
+    /// must panic due to the underlying `Token`'s `Drop` implementation.
+    /// Likewise, collecting raw handles from `iter_raw` and dropping them
+    /// without returning to `put` should panic. This verifies fail-fast
+    /// behavior that guards token balance.
+    #[test]
+    fn dropping_counted_handle_without_put_panics() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let res = catch_unwind(AssertUnwindSafe(|| {
+            let mut m: CountedHashMap<&'static str, i32> = CountedHashMap::new();
+            let h = m.insert("boom", 1).unwrap();
+            drop(h); // dropping a CountedHandle drops its token and should panic
+        }));
+        assert!(
+            res.is_err(),
+            "expected panic when CountedHandle is dropped without put"
+        );
+
+        // Also verify dropping raw handles from iter_raw without put panics
+        let res2 = catch_unwind(AssertUnwindSafe(|| {
+            let m: CountedHashMap<&'static str, i32> = {
+                let mut mm = CountedHashMap::new();
+                let _ = mm.insert("a", 1).unwrap();
+                let _ = mm.insert("b", 2).unwrap();
+                mm
+            };
+            let v: Vec<_> = m.iter_raw().collect();
+            drop(v); // each CountedHandle inside should panic on drop
+        }));
+        assert!(
+            res2.is_err(),
+            "expected panic when raw handles are dropped without put"
+        );
     }
 }
