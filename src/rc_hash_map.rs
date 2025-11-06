@@ -78,10 +78,7 @@ where
                 keepalive_token: self.inner.keepalive.get(),
             });
             match res {
-                Ok(ch) => {
-                    let ch_static: CountedHandle<'static> = unsafe { core::mem::transmute(ch) };
-                    Ok(Ref::new(NonNull::from(self.inner.as_ref()), ch_static))
-                }
+                Ok(ch) => Ok(Ref::new(NonNull::from(self.inner.as_ref()), ch)),
                 Err(e) => Err(e),
             }
         };
@@ -92,10 +89,7 @@ where
         let out = {
             let map = self.inner.map.borrow();
             let x = match map.find(key) {
-                Some(ch) => {
-                    let ch_static: CountedHandle<'static> = unsafe { core::mem::transmute(ch) };
-                    Some(Ref::new(NonNull::from(self.inner.as_ref()), ch_static))
-                }
+                Some(ch) => Some(Ref::new(NonNull::from(self.inner.as_ref()), ch)),
                 None => None,
             };
             x
@@ -157,8 +151,7 @@ where
         let inner = unsafe { self.owner_ptr.as_ref() };
         let map = inner.map.borrow();
         let ch2 = map.get(self.handle.as_ref().expect("live ref must have handle"));
-        let ch2_static: CountedHandle<'static> = unsafe { core::mem::transmute(ch2) };
-        Ref::new(self.owner_ptr, ch2_static)
+        Ref::new(self.owner_ptr, ch2)
     }
 }
 
