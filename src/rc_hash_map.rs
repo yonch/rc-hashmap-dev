@@ -1,7 +1,7 @@
 use crate::tokens::RcCount;
 // Keepalive handled via direct Rc strong-count inc/dec per entry.
-use crate::util_counted_map::{CountedHandle, CountedHashMap, PutResult};
-use crate::util_handle_map::InsertError;
+use crate::counted_hash_map::{CountedHandle, CountedHashMap, PutResult};
+use crate::handle_hash_map::InsertError;
 use core::cell::RefCell;
 use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;

@@ -12,18 +12,18 @@
 //! The internal `RcCount<T>` helper (in `tokens`) encapsulates the
 //! raw-pointer based use of `std::rc::Rc` increment/decrement APIs.
 
-mod rc_map;
+mod rc_hash_map;
 mod reentrancy;
 mod tokens;
-mod util_counted_map;
-mod util_handle_map;
-mod util_handle_map_prop;
+mod counted_hash_map;
+mod handle_hash_map;
+mod handle_hash_map_proptest;
 
 // Public surface
-pub use rc_map::{RcHashMap, Ref};
-pub use util_handle_map::InsertError;
+pub use rc_hash_map::{RcHashMap, Ref};
+pub use handle_hash_map::InsertError;
 
 // Optional: expose the internal HandleHashMap to criterion benches when requested.
 // This keeps the public API surface clean by default.
 #[cfg(feature = "bench_internal")]
-pub use util_handle_map::HandleHashMap;
+pub use handle_hash_map::HandleHashMap;
