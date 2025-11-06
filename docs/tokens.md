@@ -10,25 +10,28 @@ Abstraction
 - Token: a zero-sized, non-cloneable proof that one unit was acquired. It is lifetime-bound to the Count value that minted it, and its Drop panics to catch unbalanced flows. The only valid disposal is passing it to Count::put.
 
 Why the type system helps
-- Origin binding: Token<'a, C> embeds a borrow to the concrete counter value `&'a C` in its type via PhantomData. A token can only be returned to that same value; you can’t compile code that returns it to another Count, even of the same type.
+- Origin binding: Token<'a, C> uses two markers to separate lifetime from the counter type: `PhantomData<&'a ()>` tracks the lifetime, and `PhantomData<*const C>` brands the token to the counter type without requiring `C: 'a`. This avoids imposing lifetime bounds on `C` while preserving the brand so a token can only be returned to the same counter value.
 - Linearity and balance: Token does not implement Copy or Clone, so it cannot be duplicated. Each `get` yields exactly one Token that must be consumed by exactly one `put`. Dropping a Token instead of returning it panics, catching unbalanced flows.
 - Zero cost: Tokens are ZSTs; they add no runtime footprint and no allocation. The only costs are the underlying counter operations.
 
 Unwinding and Drop panics
 - Panicking in Token::drop during another unwind aborts. Tokens are internal implementation details, so this fail-fast behavior is acceptable and desired for our use case.
 
-API Sketch
+API Sketch (as implemented)
 ```rust
 use core::marker::PhantomData;
 
 /// Zero-sized, linear token tied to its originating count via lifetime.
 pub struct Token<'a, C: ?Sized> {
-    _marker: PhantomData<&'a C>,
+    // Lifetime tracked separately from counter type.
+    _lt: PhantomData<&'a ()>,
+    // Brand to the counter type without imposing `C: 'a`.
+    _ctr: PhantomData<*const C>,
 }
 
 impl<'a, C: ?Sized> Token<'a, C> {
     #[inline]
-    fn new() -> Self { Self { _marker: PhantomData } }
+    fn new() -> Self { Self { _lt: PhantomData, _ctr: PhantomData } }
 }
 
 impl<'a, C: ?Sized> Drop for Token<'a, C> {
@@ -46,7 +49,11 @@ pub trait Count {
         Self: 'a;
 
     /// Acquire one counted reference and return a linear token for it.
-    fn get(&self) -> Self::Token<'_>;
+    ///
+    /// We mint tokens with a 'static lifetime parameter. The token itself is
+    /// still branded to this counter via its type parameter, and can be
+    /// covariantly shortened when returning it via `put`.
+    fn get(&self) -> Self::Token<'static>;
 
     /// Return (consume) a previously acquired token.
     /// Returns true if the count is now zero.
@@ -171,8 +178,8 @@ impl<'m, V> Drop for Ref<'m, V> {
 Implementation variants
 
 UsizeCount and RcCount
-- UsizeCount: single-threaded counter using Cell<usize> to track outstanding user-facing references to an entry. Increment uses wrapping_add and aborts on wrap to 0 (matching Rc); decrement asserts nonzero before subtracting.
-- RcCount<T>: encapsulates raw Rc strong-count inc/dec behind the Count interface. Unsafety is internal; callers only manipulate Tokens.
+- UsizeCount: single-threaded counter using Cell<usize> to track outstanding user-facing references to an entry. Increment uses wrapping_add and aborts on wrap to 0 (matching Rc); decrement asserts nonzero before subtracting. An `is_zero()` helper is provided for checking whether the current count is zero.
+- RcCount<T>: encapsulates raw Rc strong-count inc/dec behind the Count interface. Unsafety is internal; callers only manipulate Tokens. You can construct it from an `Rc<T>` via `RcCount::new(&rc)` or from a `Weak<T>` via `RcCount::from_weak(&weak)`.
 
 ```rust
 use core::cell::Cell;
@@ -195,17 +202,23 @@ impl<T> RcCount<T> {
         unsafe { std::rc::Rc::decrement_strong_count(raw) };
         Self { ptr: raw, weak, _nosend: core::marker::PhantomData }
     }
+
+    /// Create from an existing Weak. Useful when using `Rc::new_cyclic`.
+    pub fn from_weak(weak: &std::rc::Weak<T>) -> Self {
+        let raw = weak.as_ptr();
+        Self { ptr: raw, weak: weak.clone(), _nosend: core::marker::PhantomData }
+    }
 }
 
-impl<T> Count for RcCount<T> {
+impl<T: 'static> Count for RcCount<T> {
     type Token<'a> = Token<'a, Self> where Self: 'a;
 
     #[inline]
-    fn get(&self) -> Self::Token<'_> {
+    fn get(&self) -> Self::Token<'static> {
         // Debug-only liveness check: there must be at least one strong count
         debug_assert!(self.weak.strong_count() > 0);
         unsafe { std::rc::Rc::increment_strong_count(self.ptr) };
-        Token::new()
+        Token::<'static, Self>::new()
     }
 
     #[inline]
@@ -227,14 +240,15 @@ pub struct UsizeCount {
 
 impl UsizeCount {
     pub fn new(initial: usize) -> Self { Self { count: Cell::new(initial) } }
-    pub fn get_raw(&self) -> usize { self.count.get() }
+    /// Returns true if the current count is zero.
+    pub fn is_zero(&self) -> bool { self.count.get() == 0 }
 }
 
 impl Count for UsizeCount {
     type Token<'a> = Token<'a, Self> where Self: 'a;
 
     #[inline]
-    fn get(&self) -> Self::Token<'_> {
+    fn get(&self) -> Self::Token<'static> {
         let c = self.count.get();
         // Match Rc semantics: wrapping add, store, then abort on wraparound.
         let n = c.wrapping_add(1);
@@ -243,7 +257,7 @@ impl Count for UsizeCount {
             // Abort the process rather than silently overflowing and risking logic errors.
             std::process::abort();
         }
-        Token::new()
+        Token::<'static, Self>::new()
     }
 
     #[inline]
