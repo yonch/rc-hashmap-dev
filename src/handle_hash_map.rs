@@ -3,7 +3,7 @@
 use crate::reentrancy::DebugReentrancy;
 use core::borrow::Borrow;
 use core::hash::{BuildHasher, Hash, Hasher};
-use hashbrown::raw::RawTable;
+use hashbrown::HashTable;
 use slotmap::{DefaultKey, SlotMap};
 use std::collections::hash_map::RandomState;
 
@@ -52,7 +52,7 @@ struct Entry<K, V> {
 
 pub struct HandleHashMap<K, V, S = RandomState> {
     hasher: S,
-    index: RawTable<DefaultKey>,
+    index: HashTable<DefaultKey>,
     slots: SlotMap<DefaultKey, Entry<K, V>>, // storage using generational keys
     reentrancy: DebugReentrancy,
 }
@@ -78,7 +78,7 @@ where
 {
     pub fn with_hasher(hasher: S) -> Self {
         Self {
-            index: RawTable::new(),
+            index: HashTable::new(),
             hasher,
             slots: SlotMap::with_key(),
             reentrancy: DebugReentrancy::new(),
@@ -108,7 +108,7 @@ where
     {
         let _g = self.reentrancy.enter();
         let hash = self.make_hash(q);
-        if let Some(&k) = self.index.get(hash, |&k| {
+        if let Some(&k) = self.index.find(hash, |&k| {
             self.slots
                 .get(k)
                 .map(|e| e.key.borrow() == q)
@@ -128,7 +128,7 @@ where
         let hash = self.make_hash(q);
         if self
             .index
-            .get(hash, |&k| {
+            .find(hash, |&k| {
                 self.slots
                     .get(k)
                     .map(|e| e.key.borrow() == q)
@@ -144,34 +144,22 @@ where
     pub fn insert(&mut self, key: K, value: V) -> Result<Handle, InsertError> {
         let _g = self.reentrancy.enter();
         let hash = self.make_hash(&key);
-        if self
-            .index
-            .get(hash, |&k| {
-                self.slots.get(k).map(|e| e.key == key).unwrap_or(false)
-            })
-            .is_some()
-        {
-            return Err(InsertError::DuplicateKey);
-        }
-
         let entry = Entry { key, value, hash };
-        // Find insertion slot; duplicate returns Ok(bucket)
-        match self.index.find_or_find_insert_slot(
+        // Use HashTable::entry to deduplicate or insert.
+        match self.index.entry(
             hash,
             |&kk| {
                 self.slots
                     .get(kk)
-                    .map(|e| e.hash == hash && e.key == entry.key)
+                    .map(|e| e.key == entry.key)
                     .unwrap_or(false)
             },
             |&kk| self.slots.get(kk).map(|e| e.hash).unwrap_or(0),
         ) {
-            Ok(_) => return Err(InsertError::DuplicateKey),
-            Err(slot) => {
+            hashbrown::hash_table::Entry::Occupied(_) => Err(InsertError::DuplicateKey),
+            hashbrown::hash_table::Entry::Vacant(v) => {
                 let k = self.slots.insert(entry);
-                unsafe {
-                    let _bucket = self.index.insert_in_slot(hash, slot, k);
-                }
+                let _ = v.insert(k);
                 Ok(Handle::new(k))
             }
         }
@@ -182,8 +170,10 @@ where
         let k = handle.key();
         let entry_hash = self.slots.get(k)?.hash;
 
-        // Unlink from index first
-        let _removed = self.index.remove_entry(entry_hash, |&kk| kk == k);
+        // Unlink from index first via occupied entry removal
+        if let Ok(occ) = self.index.find_entry(entry_hash, |&kk| kk == k) {
+            let _ = occ.remove();
+        }
 
         // Now take from slot; structure is consistent for any user code during drops
         self.slots.remove(k).map(|e| (e.key, e.value))
