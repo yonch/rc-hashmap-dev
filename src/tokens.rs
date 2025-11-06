@@ -9,17 +9,20 @@ use core::cell::Cell;
 use core::marker::PhantomData;
 use std::rc::{Rc, Weak};
 
-/// Zero-sized, linear token tied to its originating counter via a brand lifetime.
+/// Zero-sized, linear token tied to its originating counter via lifetime.
 pub struct Token<'a, C: ?Sized> {
-    // Brand ties this token to the concrete counter instance borrowed with lifetime 'a.
-    _brand: PhantomData<&'a C>,
+    // Lifetime is tracked separately from the counter type to avoid
+    // imposing `'a` bounds on `C` (useful for generic counters).
+    _lt: PhantomData<&'a ()>,
+    _ctr: PhantomData<*const C>,
 }
 
 impl<'a, C: ?Sized> Token<'a, C> {
     #[inline]
     pub(crate) fn new() -> Self {
         Self {
-            _brand: PhantomData,
+            _lt: PhantomData,
+            _ctr: PhantomData,
         }
     }
 }
@@ -38,8 +41,12 @@ pub trait Count {
     where
         Self: 'a;
 
-    /// Acquire one counted reference and return a linear, branded token for it.
-    fn get<'a>(&'a self) -> Self::Token<'a>;
+    /// Acquire one counted reference and return a linear token for it.
+    ///
+    /// We mint tokens with a 'static lifetime parameter. The token itself is
+    /// still branded to this counter via its type parameter, and can be
+    /// covariantly shortened when returning it via `put`.
+    fn get(&self) -> Self::Token<'static>;
 
     /// Return (consume) a previously acquired token.
     /// Returns true if the count is now zero.
@@ -58,6 +65,12 @@ impl UsizeCount {
             count: Cell::new(initial),
         }
     }
+
+    /// Returns true if the current count is zero.
+    #[inline]
+    pub fn is_zero(&self) -> bool {
+        self.count.get() == 0
+    }
 }
 
 impl Count for UsizeCount {
@@ -67,7 +80,7 @@ impl Count for UsizeCount {
         Self: 'a;
 
     #[inline]
-    fn get<'a>(&'a self) -> Self::Token<'a> {
+    fn get(&self) -> Self::Token<'static> {
         let c = self.count.get();
         let n = c.wrapping_add(1);
         self.count.set(n);
@@ -75,7 +88,7 @@ impl Count for UsizeCount {
             // Follow Rc semantics: abort on overflow rather than continue unsafely.
             std::process::abort();
         }
-        Token::<'a, Self>::new()
+        Token::<'static, Self>::new()
     }
 
     #[inline]
@@ -125,10 +138,10 @@ impl<T: 'static> Count for RcCount<T> {
         Self: 'a;
 
     #[inline]
-    fn get<'a>(&'a self) -> Self::Token<'a> {
+    fn get(&self) -> Self::Token<'static> {
         debug_assert!(self.weak.strong_count() > 0);
         unsafe { Rc::increment_strong_count(self.ptr) };
-        Token::<'a, Self>::new()
+        Token::<'static, Self>::new()
     }
 
     #[inline]
@@ -138,5 +151,18 @@ impl<T: 'static> Count for RcCount<T> {
         unsafe { Rc::decrement_strong_count(self.ptr) };
         core::mem::forget(t);
         was_one
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_drop_panics() {
+        let c = UsizeCount::new(0);
+        let t = c.get();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(t)));
+        assert!(res.is_err());
     }
 }
