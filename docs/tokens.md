@@ -10,7 +10,7 @@ Abstraction
 - Token: a zero-sized, non-cloneable proof that one unit was acquired. It is lifetime-bound to the Count value that minted it, and its Drop panics to catch unbalanced flows. The only valid disposal is passing it to Count::put.
 
 Why the type system helps
-- Origin binding: Token<'a, C> uses two markers to separate lifetime from the counter type: `PhantomData<&'a ()>` tracks the lifetime, and `PhantomData<*const C>` brands the token to the counter type without requiring `C: 'a`. This avoids imposing lifetime bounds on `C` while preserving the brand so a token can only be returned to the same counter value.
+- Origin binding (type-level only): Token<'a, C> uses two markers to separate lifetime from the counter type: `PhantomData<&'a ()>` tracks the lifetime, and `PhantomData<*const C>` brands the token to the counter type without requiring `C: 'a`. This branding is to the counter type, not to a specific counter instance; it does not prevent returning a token to a different instance of the same counter type. Higher-level APIs are responsible for pairing tokens with their originating instance.
 - Linearity and balance: Token does not implement Copy or Clone, so it cannot be duplicated. Each `get` yields exactly one Token that must be consumed by exactly one `put`. Dropping a Token instead of returning it panics, catching unbalanced flows.
 - Zero cost: Tokens are ZSTs; they add no runtime footprint and no allocation. The only costs are the underlying counter operations.
 
@@ -281,5 +281,5 @@ Notes on practical struct layout
  
 
 Alternatives considered
-- Plain `usize` counts without tokens: relies on discipline and is easy to misuse (double put, missing put on early return). Tokens close this gap by construction.
-- Storing a runtime back-pointer in the token: unnecessary; lifetime binding to `&self` is sufficient to prevent cross-counter misuse.
+- Plain `usize` counts without tokens: relies on discipline and is easy to misuse (double put, missing put on early return). Tokens significantly reduce misuse by construction, but do not enforce per-instance branding.
+- Storing a runtime back-pointer in the token: not implemented. Without per-instance branding, cross-instance misuse is technically possible; in this crate we rely on API structure to maintain correct pairing.
