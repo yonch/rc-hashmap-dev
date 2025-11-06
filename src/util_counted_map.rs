@@ -2,7 +2,6 @@
 
 use crate::tokens::{Count, Token, UsizeCount};
 use crate::util_handle_map::{Handle, HandleHashMap, InsertError};
-use core::ops::{Deref, DerefMut};
 
 #[derive(Debug)]
 pub struct Counted<V> {
@@ -101,10 +100,7 @@ where
         let entry = self.inner.handle_value(handle)?;
         let counter = &entry.refcount;
         let token = counter.get();
-        Some(CountedHandle {
-            handle,
-            token,
-        })
+        Some(CountedHandle { handle, token })
     }
 
     pub fn contains_key<Q>(&self, q: &Q) -> bool
@@ -168,105 +164,34 @@ where
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = ItemGuard<'_, K, V>> {
-        self.inner.iter().map(|(h, k, c)| ItemGuard {
-            handle: h,
-            key: k,
-            value: &c.value,
-            counter: &c.refcount,
-            token: Some(c.refcount.get()),
-        })
+    pub fn iter(&self) -> impl Iterator<Item = (Handle, &K, &V)> {
+        self.inner.iter().map(|(h, k, c)| (h, k, &c.value))
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = ItemGuardMut<'_, K, V>> {
-        self.inner.iter_mut().map(|(h, k, c)| {
-            let Counted { refcount, value } = c;
-            ItemGuardMut {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (Handle, &K, &mut V)> {
+        self.inner.iter_mut().map(|(h, k, c)| (h, k, &mut c.value))
+    }
+
+    pub(crate) fn iter_raw(&self) -> impl Iterator<Item = (CountedHandle<'_>, &K, &V)> {
+        self.inner.iter().map(|(h, k, c)| {
+            let ch = CountedHandle {
                 handle: h,
-                key: k,
-                value,
-                counter: refcount,
-                token: Some(refcount.get()),
-            }
+                token: c.refcount.get(),
+            };
+            (ch, k, &c.value)
+        })
+    }
+
+    pub(crate) fn iter_mut_raw(&mut self) -> impl Iterator<Item = (CountedHandle<'_>, &K, &mut V)> {
+        self.inner.iter_mut().map(|(h, k, c)| {
+            let ch = CountedHandle {
+                handle: h,
+                token: c.refcount.get(),
+            };
+            (ch, k, &mut c.value)
         })
     }
 }
 
-/// Read-only item guard yielded by `iter()`.
-pub struct ItemGuard<'a, K, V> {
-    handle: Handle,
-    key: &'a K,
-    value: &'a V,
-    counter: &'a UsizeCount,
-    token: Option<Token<'a, UsizeCount>>, // consumed on Drop
-}
-
-impl<'a, K, V> ItemGuard<'a, K, V> {
-    pub fn key(&self) -> &'a K {
-        self.key
-    }
-    pub fn value(&self) -> &'a V {
-        self.value
-    }
-}
-
-impl<'a, K, V> Deref for ItemGuard<'a, K, V> {
-    type Target = V;
-    fn deref(&self) -> &Self::Target {
-        self.value
-    }
-}
-
-impl<'a, K, V> Drop for ItemGuard<'a, K, V> {
-    fn drop(&mut self) {
-        if let Some(t) = self.token.take() {
-            let _ = self.counter.put(t);
-        }
-    }
-}
-
-/// Mutable item guard yielded by `iter_mut()`.
-pub struct ItemGuardMut<'a, K, V> {
-    handle: Handle,
-    key: &'a K,
-    value: &'a mut V,
-    counter: &'a UsizeCount,
-    token: Option<Token<'a, UsizeCount>>, // consumed on Drop
-}
-
-impl<'a, K, V> ItemGuardMut<'a, K, V> {
-    pub fn handle(&self) -> CountedHandle<'a> {
-        let t = self.counter.get();
-        CountedHandle {
-            handle: self.handle,
-            token: t,
-        }
-    }
-    pub fn key(&self) -> &'a K {
-        self.key
-    }
-    pub fn value_mut(&mut self) -> &mut V {
-        self.value
-    }
-}
-
-impl<'a, K, V> Deref for ItemGuardMut<'a, K, V> {
-    type Target = V;
-    fn deref(&self) -> &Self::Target {
-        self.value
-    }
-}
-
-impl<'a, K, V> DerefMut for ItemGuardMut<'a, K, V> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.value
-    }
-}
-
-impl<'a, K, V> Drop for ItemGuardMut<'a, K, V> {
-    fn drop(&mut self) {
-        if let Some(t) = self.token.take() {
-            let _ = self.counter.put(t);
-        }
-    }
-}
+// Simple iterators yield the same item shapes as HandleHashMap.
+// For internal use, iter_raw and iter_mut_raw mint CountedHandles; callers must put() them.
