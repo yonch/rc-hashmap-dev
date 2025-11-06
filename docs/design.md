@@ -50,15 +50,15 @@ Module 2: CountedHashMap
   - Wrap values as Counted<V> = { refcount: UsizeCount, value: V }.
   - Internally: HandleHashMap<K, Counted<V>, S>.
 - API (same surface, plus helpers)
-  - find<Q>(&self, q: &Q) -> Option<CountedHandle<'_>> where K: Borrow<Q>, Q: ?Sized + Hash + Eq
-    - If found, mints a token from the entry’s `UsizeCount` and returns a `CountedHandle<'_>` carrying that token (lifetime-bound to the counter value). The handle stores the Module 1 `Handle`.
-  - insert(&mut self, key: K, value: V) -> Result<CountedHandle<'_>, InsertError>
+  - find<Q>(&self, q: &Q) -> Option<CountedHandle<'static>> where K: Borrow<Q>, Q: ?Sized + Hash + Eq
+    - If found, mints a token from the entry’s `UsizeCount` and returns a `CountedHandle<'static>` carrying that token. The handle stores the Module 1 `Handle`.
+  - insert(&mut self, key: K, value: V) -> Result<CountedHandle<'static>, InsertError>
     - Delegates to HandleHashMap’s unique insertion. On success, initializes refcount by minting and returning a token in the resulting handle. On failure, no token is minted and the map is unchanged.
   - contains_key<Q>(&self, q: &Q) -> bool where K: Borrow<Q>, Q: ?Sized + Hash + Eq
     - Probes using the index without incrementing refcounts.
   - put(&mut self, handle: CountedHandle<'_>) -> PutResult
     - Consumes `handle`, moves its owned token by value and returns it to the entry’s `UsizeCount` (`UsizeCount::put(token)`). If it reaches 0, removes the slot from the underlying `HandleHashMap` and returns `PutResult::Removed { key: K, value: V }`. Otherwise returns `PutResult::Live`.
-  - get(&self, handle: &CountedHandle<'_>) -> CountedHandle<'_>
+  - get(&self, handle: &CountedHandle<'_>) -> CountedHandle<'static>
     - Clones by minting another token from the same entry’s `UsizeCount`; overflow/panic behavior is defined by `UsizeCount` (see tokens.md).
   - len(&self) -> usize; is_empty(&self) -> bool
   - iter(&self) -> impl Iterator<Item = ItemGuard<'_, K, V>>
@@ -159,9 +159,9 @@ struct CountedHandle<'a> {
 }
 
 impl<K: Eq + Hash, V, S: BuildHasher> CountedHashMap<K, V, S> {
-    fn find<Q: ?Sized + Hash + Eq>(&self, q: &Q) -> Option<CountedHandle<'_>> where K: Borrow<Q> { /* mint token on hit */ }
-    fn insert(&mut self, k: K, v: V) -> Result<CountedHandle<'_>, InsertError> { /* init with token; fail on dup */ }
-    fn get(&self, h: &CountedHandle<'_>) -> CountedHandle<'_> { /* mint another token for cloning using h.handle */ }
+    fn find<Q: ?Sized + Hash + Eq>(&self, q: &Q) -> Option<CountedHandle<'static>> where K: Borrow<Q> { /* mint token on hit */ }
+    fn insert(&mut self, k: K, v: V) -> Result<CountedHandle<'static>, InsertError> { /* init with token; fail on dup */ }
+    fn get(&self, h: &CountedHandle<'_>) -> CountedHandle<'static> { /* mint another token for cloning using h.handle */ }
     fn put(&self, h: CountedHandle<'_>) -> PutResult { /* consume token; via h.handle access entry counter; remove and return K,V at zero */ }
     fn len(&self) -> usize { /* number of stored/live entries (refcount >= 1) */ }
     fn is_empty(&self) -> bool { self.len() == 0 }
