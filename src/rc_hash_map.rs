@@ -6,6 +6,7 @@ use core::cell::UnsafeCell;
 use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
 use std::ptr::NonNull;
+use core::mem::ManuallyDrop;
 use std::rc::Rc;
 
 // Stored value wrapper that holds a keepalive token from `Inner`'s RcCount
@@ -131,7 +132,7 @@ where
     S: core::hash::BuildHasher + Clone + Default + 'static,
 {
     owner_ptr: NonNull<Inner<K, V, S>>,
-    handle: Option<CountedHandle<'static>>,
+    handle: ManuallyDrop<CountedHandle<'static>>,
     _nosend: PhantomData<*mut ()>,
 }
 
@@ -147,7 +148,7 @@ where
     fn new(owner_ptr: NonNull<Inner<K, V, S>>, handle: CountedHandle<'static>) -> Self {
         Self {
             owner_ptr,
-            handle: Some(handle),
+            handle: ManuallyDrop::new(handle),
             _nosend: PhantomData,
         }
     }
@@ -166,15 +167,13 @@ where
     /// Borrow the entry's key, validating owner identity.
     pub fn key<'a>(&'a self, map: &'a RcHashMap<K, V, S>) -> Result<&'a K, WrongMap> {
         self.check_owner(map)?;
-        let ch = self.handle.as_ref().expect("live ref must have handle");
-        ch.key_ref(map.map()).ok_or(WrongMap)
+        self.handle.key_ref(map.map()).ok_or(WrongMap)
     }
 
     /// Borrow the entry's value, validating owner identity.
     pub fn value<'a>(&'a self, map: &'a RcHashMap<K, V, S>) -> Result<&'a V, WrongMap> {
         self.check_owner(map)?;
-        let ch = self.handle.as_ref().expect("live ref must have handle");
-        ch.value_ref(map.map())
+        self.handle.value_ref(map.map())
             .map(|rcv| &rcv.value)
             .ok_or(WrongMap)
     }
@@ -186,8 +185,7 @@ where
         }
         // SAFETY: owner validated and we have &mut map, so exclusive access for 'a
         self.check_owner(map)?; // ensure owner match
-        let ch = self.handle.as_ref().expect("live ref must have handle");
-        ch.value_mut(map.map_mut())
+        self.handle.value_mut(map.map_mut())
             .map(|rcv| &mut rcv.value)
             .ok_or(WrongMap)
     }
@@ -202,9 +200,8 @@ where
     fn clone(&self) -> Self {
         // Increment per-entry count via counted handle API.
         let inner = unsafe { self.owner_ptr.as_ref() };
-        let ch2 = unsafe { &*inner.map.get() }
-            .get(self.handle.as_ref().expect("live ref must have handle"));
-        Ref::new(self.owner_ptr, ch2)
+        let handle = unsafe { &*inner.map.get() }.get(&self.handle);
+        Ref::new(self.owner_ptr, handle)
     }
 }
 
@@ -216,21 +213,21 @@ where
 {
     fn drop(&mut self) {
         let inner = unsafe { &mut *(self.owner_ptr.as_ptr()) };
-        if let Some(ch) = self.handle.take() {
-            let res = unsafe { &mut *inner.map.get() }.put(ch);
-            match res {
-                PutResult::Live => {}
-                PutResult::Removed { key, value } => {
-                    // Drop user data first while keepalive still holds Inner alive via strong count
-                    let RcVal {
-                        value: user_value,
-                        keepalive_token,
-                    } = value;
-                    drop(key);
-                    drop(user_value);
-                    // Return the keepalive token to decrement the strong count.
-                    inner.keepalive.put(keepalive_token);
-                }
+        // Move out the handle without running its destructor.
+        let ch = unsafe { ManuallyDrop::take(&mut self.handle) };
+        let res = unsafe { &mut *inner.map.get() }.put(ch);
+        match res {
+            PutResult::Live => {}
+            PutResult::Removed { key, value } => {
+                // Drop user data first while keepalive still holds Inner alive via strong count
+                let RcVal {
+                    value: user_value,
+                    keepalive_token,
+                } = value;
+                drop(key);
+                drop(user_value);
+                // Return the keepalive token to decrement the strong count.
+                inner.keepalive.put(keepalive_token);
             }
         }
     }
@@ -242,8 +239,7 @@ where
     S: core::hash::BuildHasher + Clone + Default,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.owner_ptr == other.owner_ptr
-            && self.handle.as_ref().map(|h| h.handle) == other.handle.as_ref().map(|h| h.handle)
+        self.owner_ptr == other.owner_ptr && self.handle.handle == other.handle.handle
     }
 }
 
@@ -261,9 +257,7 @@ where
 {
     fn hash<H: Hasher>(&self, state: &mut H) {
         (self.owner_ptr.as_ptr() as usize).hash(state);
-        if let Some(h) = &self.handle {
-            h.handle.hash(state);
-        }
+        self.handle.handle.hash(state);
     }
 }
 /// Placeholder for future mutable iterator item (see design docs).
