@@ -9,20 +9,17 @@ use core::cell::Cell;
 use core::marker::PhantomData;
 use std::rc::{Rc, Weak};
 
-/// Zero-sized, linear token tied to its originating counter via lifetime.
+/// Zero-sized, linear token tied to its originating counter via a brand lifetime.
 pub struct Token<'a, C: ?Sized> {
-    // Lifetime is tracked separately from the counter type to avoid
-    // imposing `'a` bounds on `C` (useful for generic counters).
-    _lt: PhantomData<&'a ()>,
-    _ctr: PhantomData<*const C>,
+    // Brand ties this token to the concrete counter instance borrowed with lifetime 'a.
+    _brand: PhantomData<&'a C>,
 }
 
 impl<'a, C: ?Sized> Token<'a, C> {
     #[inline]
     pub(crate) fn new() -> Self {
         Self {
-            _lt: PhantomData,
-            _ctr: PhantomData,
+            _brand: PhantomData,
         }
     }
 }
@@ -41,12 +38,8 @@ pub trait Count {
     where
         Self: 'a;
 
-    /// Acquire one counted reference and return a linear token for it.
-    ///
-    /// We mint tokens with a 'static lifetime parameter. The token itself is
-    /// still branded to this counter via its type parameter, and can be
-    /// covariantly shortened when returning it via `put`.
-    fn get(&self) -> Self::Token<'static>;
+    /// Acquire one counted reference and return a linear, branded token for it.
+    fn get<'a>(&'a self) -> Self::Token<'a>;
 
     /// Return (consume) a previously acquired token.
     /// Returns true if the count is now zero.
@@ -74,7 +67,7 @@ impl Count for UsizeCount {
         Self: 'a;
 
     #[inline]
-    fn get(&self) -> Self::Token<'static> {
+    fn get<'a>(&'a self) -> Self::Token<'a> {
         let c = self.count.get();
         let n = c.wrapping_add(1);
         self.count.set(n);
@@ -82,7 +75,7 @@ impl Count for UsizeCount {
             // Follow Rc semantics: abort on overflow rather than continue unsafely.
             std::process::abort();
         }
-        Token::<'static, Self>::new()
+        Token::<'a, Self>::new()
     }
 
     #[inline]
@@ -114,6 +107,15 @@ impl<T> RcCount<T> {
             _nosend: PhantomData,
         }
     }
+
+    pub fn from_weak(weak: &Weak<T>) -> Self {
+        let raw = weak.as_ptr();
+        Self {
+            ptr: raw,
+            weak: weak.clone(),
+            _nosend: PhantomData,
+        }
+    }
 }
 
 impl<T: 'static> Count for RcCount<T> {
@@ -123,10 +125,10 @@ impl<T: 'static> Count for RcCount<T> {
         Self: 'a;
 
     #[inline]
-    fn get(&self) -> Self::Token<'static> {
+    fn get<'a>(&'a self) -> Self::Token<'a> {
         debug_assert!(self.weak.strong_count() > 0);
         unsafe { Rc::increment_strong_count(self.ptr) };
-        Token::<'static, Self>::new()
+        Token::<'a, Self>::new()
     }
 
     #[inline]

@@ -108,10 +108,12 @@ where
     {
         let _g = self.reentrancy.enter();
         let hash = self.make_hash(q);
-        if let Some(&k) = self
-            .index
-            .get(hash, |&k| self.slots.get(k).map(|e| e.key.borrow() == q).unwrap_or(false))
-        {
+        if let Some(&k) = self.index.get(hash, |&k| {
+            self.slots
+                .get(k)
+                .map(|e| e.key.borrow() == q)
+                .unwrap_or(false)
+        }) {
             return Some(Handle::new(k));
         }
         None
