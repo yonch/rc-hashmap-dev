@@ -2,7 +2,6 @@
 
 use crate::tokens::{Count, Token, UsizeCount};
 use crate::util_handle_map::{Handle, HandleHashMap, InsertError};
-use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 
 #[derive(Debug)]
@@ -24,11 +23,10 @@ pub struct CountedHashMap<K, V, S = std::collections::hash_map::RandomState> {
     pub(crate) inner: HandleHashMap<K, Counted<V>, S>,
 }
 
-/// Counted handle carrying a linear token tied to the entry counter.
+/// Counted handle carrying a linear token branded to its entry counter instance.
 pub struct CountedHandle<'a> {
     pub(crate) handle: Handle,
-    pub(crate) token: Token<'static, UsizeCount>, // ZST token owned and consumed by put()
-    pub(crate) _brand: PhantomData<&'a ()>,
+    pub(crate) token: Token<'a, UsizeCount>, // owned and consumed by put()
 }
 
 impl<'a> CountedHandle<'a> {
@@ -100,11 +98,12 @@ where
         Q: ?Sized + core::hash::Hash + Eq,
     {
         let h = self.inner.find(q)?;
-        let t = self.inner.handle_value(h)?.refcount.get();
+        let entry = self.inner.handle_value(h)?;
+        let counter = &entry.refcount;
+        let t = counter.get();
         Some(CountedHandle {
             handle: h,
             token: t,
-            _brand: PhantomData,
         })
     }
 
@@ -118,35 +117,32 @@ where
 
     /// Insert a new key -> value and mint a token for the returned handle.
     pub fn insert(&mut self, key: K, value: V) -> Result<CountedHandle<'_>, InsertError> {
-        let refcount = UsizeCount::new(0);
-        let token = refcount.get();
-        let counted = Counted { refcount, value };
+        let counted = Counted::new(value, 0);
         match self.inner.insert(key, counted) {
-            Ok(handle) => Ok(CountedHandle {
-                handle,
-                token,
-                _brand: PhantomData,
-            }),
-            Err(e) => {
-                // disarm the panic on dropped token
-                std::mem::forget(token);
-                Err(e)
+            Ok(handle) => {
+                let entry = self
+                    .inner
+                    .handle_value(handle)
+                    .expect("entry must exist immediately after successful insert");
+                let counter = &entry.refcount;
+                let token = counter.get();
+                Ok(CountedHandle { handle, token })
             }
+            Err(e) => Err(e),
         }
     }
 
     /// Mint another token for the same entry; used to clone a counted handle.
     pub fn get(&self, h: &CountedHandle<'_>) -> CountedHandle<'_> {
-        let t = self
+        // Validate the handle still refers to a live entry while the existing token is held.
+        let entry = self
             .inner
             .handle_value(h.handle)
-            .expect("handle must be valid while counted handle is live")
-            .refcount
-            .get();
+            .expect("handle must be valid while counted handle is live");
+        let t = entry.refcount.get();
         CountedHandle {
             handle: h.handle,
             token: t,
-            _brand: PhantomData,
         }
     }
 
@@ -202,18 +198,10 @@ pub struct ItemGuard<'a, K, V> {
     key: &'a K,
     value: &'a V,
     counter: &'a UsizeCount,
-    token: Option<Token<'static, UsizeCount>>, // consumed on Drop
+    token: Option<Token<'a, UsizeCount>>, // consumed on Drop
 }
 
 impl<'a, K, V> ItemGuard<'a, K, V> {
-    pub fn handle(&self) -> CountedHandle<'a> {
-        let t = self.counter.get();
-        CountedHandle {
-            handle: self.handle,
-            token: t,
-            _brand: PhantomData,
-        }
-    }
     pub fn key(&self) -> &'a K {
         self.key
     }
@@ -243,7 +231,7 @@ pub struct ItemGuardMut<'a, K, V> {
     key: &'a K,
     value: &'a mut V,
     counter: &'a UsizeCount,
-    token: Option<Token<'static, UsizeCount>>, // consumed on Drop
+    token: Option<Token<'a, UsizeCount>>, // consumed on Drop
 }
 
 impl<'a, K, V> ItemGuardMut<'a, K, V> {
@@ -252,7 +240,6 @@ impl<'a, K, V> ItemGuardMut<'a, K, V> {
         CountedHandle {
             handle: self.handle,
             token: t,
-            _brand: PhantomData,
         }
     }
     pub fn key(&self) -> &'a K {

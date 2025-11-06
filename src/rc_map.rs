@@ -32,11 +32,7 @@ where
         Self {
             inner: Rc::new_cyclic(|weak| Inner {
                 map: RefCell::new(CountedHashMap::new()),
-                keepalive: RcCount::new(
-                    &weak
-                        .upgrade()
-                        .expect("should be able to upgrade during Rc::new_cyclic"),
-                ),
+                keepalive: RcCount::from_weak(weak),
             }),
         }
     }
@@ -51,11 +47,7 @@ where
         Self {
             inner: Rc::new_cyclic(|weak| Inner {
                 map: RefCell::new(CountedHashMap::with_hasher(hasher)),
-                keepalive: RcCount::new(
-                    &weak
-                        .upgrade()
-                        .expect("should be able to upgrade during Rc::new_cyclic"),
-                ),
+                keepalive: RcCount::from_weak(weak),
             }),
         }
     }
@@ -84,25 +76,37 @@ where
             owner_raw: raw,
         };
 
-        let mut map = self.inner.map.borrow_mut();
-        match map.insert(key, wrapped) {
-            Ok(ch) => {
-                let ch_static: CountedHandle<'static> = unsafe { core::mem::transmute(ch) };
-                Ok(Ref::new(NonNull::from(self.inner.as_ref()), ch_static))
-            }
-            Err(e) => {
-                // On failure, undo the strong-count increment.
-                unsafe { Rc::decrement_strong_count(raw) };
-                Err(e)
-            }
-        }
+        let out = {
+            let mut map = self.inner.map.borrow_mut();
+            let x = match map.insert(key, wrapped) {
+                Ok(ch) => {
+                    let ch_static: CountedHandle<'static> = unsafe { core::mem::transmute(ch) };
+                    Ok(Ref::new(NonNull::from(self.inner.as_ref()), ch_static))
+                }
+                Err(e) => {
+                    // On failure, undo the strong-count increment.
+                    unsafe { Rc::decrement_strong_count(raw) };
+                    Err(e)
+                }
+            };
+            x
+        };
+        out
     }
 
     pub fn get(&self, key: &K) -> Option<Ref<K, V, S>> {
-        let map = self.inner.map.borrow();
-        let ch = map.find(key)?;
-        let ch_static: CountedHandle<'static> = unsafe { core::mem::transmute(ch) };
-        Some(Ref::new(NonNull::from(self.inner.as_ref()), ch_static))
+        let out = {
+            let map = self.inner.map.borrow();
+            let x = match map.find(key) {
+                Some(ch) => {
+                    let ch_static: CountedHandle<'static> = unsafe { core::mem::transmute(ch) };
+                    Some(Ref::new(NonNull::from(self.inner.as_ref()), ch_static))
+                }
+                None => None,
+            };
+            x
+        };
+        out
     }
 }
 
