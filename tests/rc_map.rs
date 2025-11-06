@@ -60,10 +60,8 @@ fn ref_equality_and_hash() {
 
 #[test]
 fn wrong_map_accessors_reject() {
-    use rc_hashmap::Ref as _; // silence unused import warnings if traits added later
-
     let mut m1 = RcHashMap::new();
-    let mut m2 = RcHashMap::new();
+    let m2 = RcHashMap::new();
     let r = m1.insert("a".to_string(), 11).unwrap();
 
     // Owner-checked accessors
