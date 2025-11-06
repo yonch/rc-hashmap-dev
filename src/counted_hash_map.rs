@@ -1,7 +1,7 @@
 //! CountedHashMap: per-entry reference counting atop HandleHashMap using tokens.
 
-use crate::tokens::{Count, Token, UsizeCount};
 use crate::handle_hash_map::{Handle, HandleHashMap, InsertError};
+use crate::tokens::{Count, Token, UsizeCount};
 
 #[derive(Debug)]
 pub struct Counted<V> {
@@ -195,3 +195,79 @@ where
 
 // Simple iterators yield the same item shapes as HandleHashMap.
 // For internal use, iter_raw and iter_mut_raw mint CountedHandles; callers must put() them.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Property: For each key, liveness matches whether there exists at least one outstanding handle.
+    proptest! {
+        #[test]
+        fn prop_counted_hashmap_liveness(keys in 1usize..=5, ops in proptest::collection::vec((0u8..=4u8, 0usize..100usize), 1..100)) {
+            let mut m: CountedHashMap<String, i32> = CountedHashMap::new();
+            let mut live: Vec<Vec<CountedHandle<'static>>> = std::iter::repeat_with(Vec::new).take(keys).collect();
+
+            for (op, raw_k) in ops.into_iter() {
+                let k = raw_k % keys;
+                let key = format!("k{}", k);
+                match op {
+                    // Insert new entry with value == k
+                    0 => {
+                        let res = m.insert(key.clone(), k as i32);
+                        match res {
+                            Ok(h) => live[k].push(unsafe { core::mem::transmute(h) }),
+                            Err(InsertError::DuplicateKey) => {}
+                        }
+                    }
+                    // Find returns a new handle if present
+                    1 => {
+                        if let Some(h) = m.find(&key) {
+                            live[k].push(unsafe { core::mem::transmute(h) });
+                        }
+                    }
+                    // Clone using get()
+                    2 => {
+                        if let Some(h) = live[k].pop() {
+                            let h2 = m.get(&h);
+                            live[k].push(h);
+                            live[k].push(unsafe { core::mem::transmute(h2) });
+                        }
+                    }
+                    // Put one handle back
+                    3 => {
+                        if let Some(h) = live[k].pop() {
+                            match m.put(unsafe { core::mem::transmute(h) }) {
+                                PutResult::Live => {}
+                                PutResult::Removed { key: _, value: _ } => {
+                                    // After removal there should be no more live handles for this key
+                                    // (since this was the last token).
+                                    prop_assert!(live[k].is_empty());
+                                }
+                            }
+                        }
+                    }
+                    // Return all handles for this key
+                    4 => {
+                        while let Some(h) = live[k].pop() {
+                            let _ = m.put(unsafe { core::mem::transmute(h) });
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+
+                let present = m.contains_key(&key);
+                prop_assert_eq!(present, !live[k].is_empty());
+            }
+
+            // Drain remaining handles and verify emptiness condition is consistent
+            for k in 0..keys {
+                while let Some(h) = live[k].pop() {
+                    let _ = m.put(unsafe { core::mem::transmute(h) });
+                }
+                let key = format!("k{}", k);
+                prop_assert_eq!(m.contains_key(&key), false);
+            }
+        }
+    }
+}
