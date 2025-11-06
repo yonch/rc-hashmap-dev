@@ -15,7 +15,7 @@ Why this split?
 - Clear failure boundaries: HandleHashMap never calls into user code once the data structure is in a consistent state.
 
 Module 1: HandleHashMap
-- How: Combine hashbrown::raw::RawTable as an index with slotmap::SlotMap as storage. `Handle` is a small wrapper around the slotmap `DefaultKey` and provides efficient access to the entries.
+- How: Combine hashbrown::HashTable as an index with slotmap::SlotMap as storage. `Handle` is a small wrapper around the slotmap `DefaultKey` and provides efficient access to the entries.
 - Entry<K, V>
   - key: K — user key; used for Eq/Hash only.
   - value: V — stored inline.
@@ -54,24 +54,19 @@ Module 2: CountedHashMap
     - If found, mints a token from the entry’s `UsizeCount` and returns a `CountedHandle<'static>` carrying that token. The handle stores the Module 1 `Handle`.
   - insert(&mut self, key: K, value: V) -> Result<CountedHandle<'static>, InsertError>
     - Delegates to HandleHashMap’s unique insertion. On success, initializes refcount by minting and returning a token in the resulting handle. On failure, no token is minted and the map is unchanged.
+  - insert_with<F>(&mut self, key: K, default: F) -> Result<CountedHandle<'static>, InsertError> where F: FnOnce() -> V
+    - Lazily constructs the value only when inserting a new key; does not run `default` on duplicates.
+  - get(&self, handle: &CountedHandle<'_>) -> CountedHandle<'static>
+    - Clones by minting another token from the same entry’s `UsizeCount`.
+  - put(&mut self, handle: CountedHandle<'_>) -> PutResult
+    - Consumes `handle`, returns its owned token via `UsizeCount::put(token)`; removes and returns `(K, V)` at zero, otherwise reports `Live`.
   - contains_key<Q>(&self, q: &Q) -> bool where K: Borrow<Q>, Q: ?Sized + Hash + Eq
     - Probes using the index without incrementing refcounts.
-  - put(&mut self, handle: CountedHandle<'_>) -> PutResult
-    - Consumes `handle`, moves its owned token by value and returns it to the entry’s `UsizeCount` (`UsizeCount::put(token)`). If it reaches 0, removes the slot from the underlying `HandleHashMap` and returns `PutResult::Removed { key: K, value: V }`. Otherwise returns `PutResult::Live`.
-  - get(&self, handle: &CountedHandle<'_>) -> CountedHandle<'static>
-    - Clones by minting another token from the same entry’s `UsizeCount`; overflow/panic behavior is defined by `UsizeCount` (see tokens.md).
   - len(&self) -> usize; is_empty(&self) -> bool
-  - iter(&self) -> impl Iterator<Item = ItemGuard<'_, K, V>>
-    - Before yielding each item, mints a token from the entry's `UsizeCount`. Yields an RAII guard that:
-      - exposes `handle() -> CountedHandle<'_>`, `key() -> &K`, `value() -> &V` (and `Deref<Target = V>`),
-      - on Drop, returns the guard’s token to the entry’s `UsizeCount` to release the increment.
-    - This ensures `put` is balanced correctly and never runs while `&K`/`&V` are still borrowed.
-  - iter_mut(&mut self) -> impl Iterator<Item = ItemGuardMut<'_, K, V>>
-    - Before yielding each item, mints a token from the entry's `UsizeCount`. Yields an RAII guard that:
-      - exposes `handle() -> CountedHandle<'_>`, `key() -> &K`, `value_mut() -> &mut V` (and `DerefMut<Target = V>`),
-      - on Drop, returns the guard’s token to the entry’s `UsizeCount` to release the increment.
-    - Using a guard keeps semantics parallel to Module 3 (where `Ref` acts as the guard) and ensures refcount is balanced even on early loop exit.  
-  - Notes
+  - iter(&self) -> impl Iterator<Item = (Handle, &K, &V)>
+  - iter_mut(&mut self) -> impl Iterator<Item = (Handle, &K, &mut V)>
+  - Internal helpers for scoped work: `iter_raw()` / `iter_mut_raw()` yield `CountedHandle`s alongside references; callers must return those handles via `put()`.
+- Notes
   - Unique-key policy is enforced in Module 1 and reused here unchanged; refcounting is orthogonal.
   - All increments/decrements are interior-mutable and single-threaded.
   - The underlying HandleHashMap remains consistent at all times; drops of K and V happen only after the handle's slot is removed from both index and storage.
