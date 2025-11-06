@@ -3,7 +3,7 @@
 // Property tests for HandleHashMap kept inside the crate so they do not
 // require feature gates to access internal modules.
 
-use crate::util_handle_map::{Handle, HandleHashMap, InsertError};
+use crate::handle_hash_map::{Handle, HandleHashMap, InsertError};
 use proptest::prelude::*;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;

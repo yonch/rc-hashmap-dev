@@ -1,7 +1,7 @@
 //! CountedHashMap: per-entry reference counting atop HandleHashMap using tokens.
 
 use crate::tokens::{Count, Token, UsizeCount};
-use crate::util_handle_map::{Handle, HandleHashMap, InsertError};
+use crate::handle_hash_map::{Handle, HandleHashMap, InsertError};
 
 #[derive(Debug)]
 pub struct Counted<V> {
