@@ -91,7 +91,7 @@ where
         self.inner.is_empty()
     }
 
-    pub fn find<Q>(&self, q: &Q) -> Option<CountedHandle<'_>>
+    pub fn find<Q>(&self, q: &Q) -> Option<CountedHandle<'static>>
     where
         K: core::borrow::Borrow<Q>,
         Q: ?Sized + core::hash::Hash + Eq,
@@ -112,7 +112,7 @@ where
     }
 
     /// Insert a new key -> value and mint a token for the returned handle.
-    pub fn insert(&mut self, key: K, value: V) -> Result<CountedHandle<'_>, InsertError> {
+    pub fn insert(&mut self, key: K, value: V) -> Result<CountedHandle<'static>, InsertError> {
         let counted = Counted::new(value, 0);
         match self.inner.insert(key, counted) {
             Ok(handle) => {
@@ -129,7 +129,7 @@ where
     }
 
     /// Mint another token for the same entry; used to clone a counted handle.
-    pub fn get(&self, h: &CountedHandle<'_>) -> CountedHandle<'_> {
+    pub fn get(&self, h: &CountedHandle<'_>) -> CountedHandle<'static> {
         // Validate the handle still refers to a live entry while the existing token is held.
         let entry = self
             .inner
@@ -143,14 +143,15 @@ where
     }
 
     /// Insert using a lazy value constructor; only calls `default()` when inserting.
-    pub fn insert_with<F>(&mut self, key: K, default: F) -> Result<CountedHandle<'_>, InsertError>
+    pub fn insert_with<F>(
+        &mut self,
+        key: K,
+        default: F,
+    ) -> Result<CountedHandle<'static>, InsertError>
     where
         F: FnOnce() -> V,
     {
-        match self
-            .inner
-            .insert_with(key, || Counted::new(default(), 0))
-        {
+        match self.inner.insert_with(key, || Counted::new(default(), 0)) {
             Ok(handle) => {
                 let entry = self
                     .inner
@@ -193,7 +194,7 @@ where
         self.inner.iter_mut().map(|(h, k, c)| (h, k, &mut c.value))
     }
 
-    pub(crate) fn iter_raw(&self) -> impl Iterator<Item = (CountedHandle<'_>, &K, &V)> {
+    pub(crate) fn iter_raw(&self) -> impl Iterator<Item = (CountedHandle<'static>, &K, &V)> {
         self.inner.iter().map(|(h, k, c)| {
             let ch = CountedHandle {
                 handle: h,
@@ -203,7 +204,9 @@ where
         })
     }
 
-    pub(crate) fn iter_mut_raw(&mut self) -> impl Iterator<Item = (CountedHandle<'_>, &K, &mut V)> {
+    pub(crate) fn iter_mut_raw(
+        &mut self,
+    ) -> impl Iterator<Item = (CountedHandle<'static>, &K, &mut V)> {
         self.inner.iter_mut().map(|(h, k, c)| {
             let ch = CountedHandle {
                 handle: h,
@@ -221,6 +224,7 @@ where
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use std::cell::Cell;
 
     // Property: For each key, liveness matches whether there exists at least one outstanding handle.
     proptest! {
@@ -237,14 +241,14 @@ mod tests {
                     0 => {
                         let res = m.insert(key.clone(), k as i32);
                         match res {
-                            Ok(h) => live[k].push(unsafe { core::mem::transmute(h) }),
+                            Ok(h) => live[k].push(h),
                             Err(InsertError::DuplicateKey) => {}
                         }
                     }
                     // Find returns a new handle if present
                     1 => {
                         if let Some(h) = m.find(&key) {
-                            live[k].push(unsafe { core::mem::transmute(h) });
+                            live[k].push(h);
                         }
                     }
                     // Clone using get()
@@ -252,13 +256,13 @@ mod tests {
                         if let Some(h) = live[k].pop() {
                             let h2 = m.get(&h);
                             live[k].push(h);
-                            live[k].push(unsafe { core::mem::transmute(h2) });
+                            live[k].push(h2);
                         }
                     }
                     // Put one handle back
                     3 => {
                         if let Some(h) = live[k].pop() {
-                            match m.put(unsafe { core::mem::transmute(h) }) {
+                            match m.put(h) {
                                 PutResult::Live => {}
                                 PutResult::Removed { key: _, value: _ } => {
                                     // After removal there should be no more live handles for this key
@@ -270,9 +274,7 @@ mod tests {
                     }
                     // Return all handles for this key
                     4 => {
-                        while let Some(h) = live[k].pop() {
-                            let _ = m.put(unsafe { core::mem::transmute(h) });
-                        }
+                        while let Some(h) = live[k].pop() { let _ = m.put(h); }
                     }
                     _ => unreachable!(),
                 }
@@ -283,9 +285,7 @@ mod tests {
 
             // Drain remaining handles and verify emptiness condition is consistent
             for k in 0..keys {
-                while let Some(h) = live[k].pop() {
-                    let _ = m.put(unsafe { core::mem::transmute(h) });
-                }
+                while let Some(h) = live[k].pop() { let _ = m.put(h); }
                 let key = format!("k{}", k);
                 prop_assert_eq!(m.contains_key(&key), false);
             }
