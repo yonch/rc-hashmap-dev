@@ -142,6 +142,27 @@ where
         }
     }
 
+    /// Insert using a lazy value constructor; only calls `default()` when inserting.
+    pub fn insert_with<F>(&mut self, key: K, default: F) -> Result<CountedHandle<'_>, InsertError>
+    where
+        F: FnOnce() -> V,
+    {
+        match self
+            .inner
+            .insert_with(key, || Counted::new(default(), 0))
+        {
+            Ok(handle) => {
+                let entry = self
+                    .inner
+                    .handle_value(handle)
+                    .expect("entry must exist immediately after successful insert");
+                let token = entry.refcount.get();
+                Ok(CountedHandle { handle, token })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Return a token for an entry; removes and returns (K, V) when count hits zero.
     pub fn put(&mut self, h: CountedHandle<'_>) -> PutResult<K, V> {
         let CountedHandle { handle, token, .. } = h;
@@ -269,5 +290,56 @@ mod tests {
                 prop_assert_eq!(m.contains_key(&key), false);
             }
         }
+    }
+
+    #[test]
+    fn insert_with_is_lazy_and_mints_token() {
+        use crate::handle_hash_map::InsertError;
+
+        let mut m: CountedHashMap<String, i32> = CountedHashMap::new();
+        let calls = Cell::new(0);
+
+        let ch = m
+            .insert_with("k".to_string(), || {
+                calls.set(calls.get() + 1);
+                7
+            })
+            .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(ch.value_ref(&m), Some(&7));
+
+        // Duplicate must not call default and must not mint a token
+        {
+            let dup = m.insert_with("k".to_string(), || {
+                calls.set(calls.get() + 1);
+                99
+            });
+            match dup {
+                Err(InsertError::DuplicateKey) => {}
+                _ => panic!("unexpected result"),
+            }
+        }
+        assert_eq!(calls.get(), 1);
+
+        // Since ch is the only outstanding token, returning it removes the entry
+        match m.put(ch) {
+            PutResult::Removed { key, value } => {
+                assert_eq!(key, "k".to_string());
+                assert_eq!(value, 7);
+            }
+            _ => panic!("expected removal"),
+        }
+        assert!(!m.contains_key(&"k".to_string()));
+    }
+
+    #[test]
+    fn insert_with_then_mutate_value() {
+        let mut m: CountedHashMap<String, i32> = CountedHashMap::new();
+        let ch = m.insert_with("k".to_string(), || 10).unwrap();
+        if let Some(v) = ch.value_mut(&mut m) {
+            *v += 5;
+        }
+        assert_eq!(ch.value_ref(&m), Some(&15));
+        let _ = m.put(ch);
     }
 }
