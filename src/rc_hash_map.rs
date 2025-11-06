@@ -183,7 +183,10 @@ where
                 PutResult::Live => {}
                 PutResult::Removed { key, value } => {
                     // Drop user data first while keepalive still holds Inner alive via strong count
-                    let RcVal { value: user_value, keepalive_token } = value;
+                    let RcVal {
+                        value: user_value,
+                        keepalive_token,
+                    } = value;
                     drop(key);
                     drop(user_value);
                     // Return the keepalive token to decrement the strong count.
