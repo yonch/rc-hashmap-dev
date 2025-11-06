@@ -97,13 +97,13 @@ where
         K: core::borrow::Borrow<Q>,
         Q: ?Sized + core::hash::Hash + Eq,
     {
-        let h = self.inner.find(q)?;
-        let entry = self.inner.handle_value(h)?;
+        let handle = self.inner.find(q)?;
+        let entry = self.inner.handle_value(handle)?;
         let counter = &entry.refcount;
-        let t = counter.get();
+        let token = counter.get();
         Some(CountedHandle {
-            handle: h,
-            token: t,
+            handle,
+            token,
         })
     }
 
@@ -139,10 +139,10 @@ where
             .inner
             .handle_value(h.handle)
             .expect("handle must be valid while counted handle is live");
-        let t = entry.refcount.get();
+        let token = entry.refcount.get();
         CountedHandle {
             handle: h.handle,
-            token: t,
+            token,
         }
     }
 
