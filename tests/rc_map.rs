@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 
 #[test]
 fn insert_get_clone_drop_removes() {
-    let m = RcHashMap::new();
+    let mut m = RcHashMap::new();
     let r = m.insert("k1".to_string(), 42).expect("insert ok");
     assert_eq!(m.len(), 1);
     assert!(m.contains_key(&"k1".to_string()));
@@ -31,7 +31,7 @@ fn insert_get_clone_drop_removes() {
 
 #[test]
 fn duplicate_insert_rejected() {
-    let m = RcHashMap::new();
+    let mut m = RcHashMap::new();
     let r = m.insert("dup".to_string(), 1).unwrap();
     let e = m.insert("dup".to_string(), 2);
     match e {
@@ -43,7 +43,7 @@ fn duplicate_insert_rejected() {
 
 #[test]
 fn ref_equality_and_hash() {
-    let m = RcHashMap::new();
+    let mut m = RcHashMap::new();
     let r1 = m.insert("a".to_string(), 10).unwrap();
     let r1b = r1.clone();
     assert!(r1 == r1b);
