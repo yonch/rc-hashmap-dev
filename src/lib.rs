@@ -68,7 +68,7 @@
 //!   raw-pointer based use of `std::rc::Rc` increment/decrement APIs.
 
 mod counted_hash_map;
-mod handle_hash_map;
+pub mod handle_hash_map;
 mod handle_hash_map_proptest;
 mod rc_hash_map;
 mod reentrancy;
@@ -77,8 +77,3 @@ pub mod tokens;
 // Public surface
 pub use handle_hash_map::InsertError;
 pub use rc_hash_map::{RcHashMap, Ref};
-
-// Optional: expose the internal HandleHashMap to criterion benches when requested.
-// This keeps the public API surface clean by default.
-#[cfg(feature = "bench_internal")]
-pub use handle_hash_map::HandleHashMap;

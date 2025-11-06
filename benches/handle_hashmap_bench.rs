@@ -1,5 +1,3 @@
-#![cfg(feature = "bench_internal")]
-
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
 use rc_hashmap::HandleHashMap;
 use std::time::Duration; // exposed when feature bench_internal is enabled
