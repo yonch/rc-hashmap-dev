@@ -17,7 +17,7 @@ fn bench_insert(c: &mut Criterion) {
     c.bench_function("rc_hashmap_insert_10k", |b| {
         b.iter_batched(
             || RcHashMap::<String, u64>::new(),
-            |m| {
+            |mut m| {
                 // Hold refs to avoid immediate removals during insert loop.
                 let mut refs = Vec::with_capacity(10_000);
                 for (i, x) in lcg(1).take(10_000).enumerate() {
@@ -32,7 +32,7 @@ fn bench_insert(c: &mut Criterion) {
 
 fn bench_get_hit(c: &mut Criterion) {
     c.bench_function("rc_hashmap_get_hit", |b| {
-        let m = RcHashMap::new();
+        let mut m = RcHashMap::new();
         let keys: Vec<_> = lcg(7).take(20_000).map(key).collect();
         // Keep the inserted refs alive to ensure entries remain in the map.
         let _held: Vec<_> = keys
@@ -52,7 +52,7 @@ fn bench_get_hit(c: &mut Criterion) {
 
 fn bench_get_miss(c: &mut Criterion) {
     c.bench_function("rc_hashmap_get_miss", |b| {
-        let m = RcHashMap::new();
+        let mut m = RcHashMap::new();
         for (i, x) in lcg(11).take(10_000).enumerate() {
             let _ = m.insert(key(x), i as u64).unwrap();
         }
@@ -67,7 +67,7 @@ fn bench_get_miss(c: &mut Criterion) {
 
 fn bench_clone_drop_refs(c: &mut Criterion) {
     c.bench_function("rc_hashmap_clone_drop_ref", |b| {
-        let m = RcHashMap::new();
+        let mut m = RcHashMap::new();
         let r = m.insert("key".to_string(), 1u64).unwrap();
         b.iter(|| {
             let x = r.clone();
