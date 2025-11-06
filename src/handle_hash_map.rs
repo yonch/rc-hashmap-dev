@@ -165,6 +165,28 @@ where
         }
     }
 
+    pub fn insert_with<F>(&mut self, key: K, default: F) -> Result<Handle, InsertError>
+    where
+        F: FnOnce() -> V,
+    {
+        let _g = self.reentrancy.enter();
+        let hash = self.make_hash(&key);
+        match self.index.entry(
+            hash,
+            |&kk| self.slots.get(kk).map(|e| e.key == key).unwrap_or(false),
+            |&kk| self.slots.get(kk).map(|e| e.hash).unwrap_or(0),
+        ) {
+            hashbrown::hash_table::Entry::Occupied(_) => Err(InsertError::DuplicateKey),
+            hashbrown::hash_table::Entry::Vacant(v) => {
+                let value = default();
+                let entry = Entry { key, value, hash };
+                let k = self.slots.insert(entry);
+                let _ = v.insert(k);
+                Ok(Handle::new(k))
+            }
+        }
+    }
+
     pub fn remove(&mut self, handle: Handle) -> Option<(K, V)> {
         let _g = self.reentrancy.enter();
         let k = handle.key();
@@ -488,5 +510,50 @@ mod tests {
             let _ = m.find(&query);
         }));
         assert!(res.is_err(), "expected reentrancy to panic in debug builds");
+    }
+
+    #[test]
+    fn insert_with_is_lazy_and_deduplicates() {
+        let mut m: HandleHashMap<String, String> = HandleHashMap::new();
+        let calls = Cell::new(0);
+
+        let r = m.insert_with("k".to_string(), || {
+            calls.set(calls.get() + 1);
+            "v".to_string()
+        });
+        assert!(r.is_ok());
+        assert_eq!(calls.get(), 1);
+
+        // Duplicate: must not run default closure
+        let r2 = m.insert_with("k".to_string(), || {
+            calls.set(calls.get() + 1);
+            "v2".to_string()
+        });
+        match r2 {
+            Err(InsertError::DuplicateKey) => {}
+            other => panic!("unexpected result: {:?}", other),
+        }
+        assert_eq!(calls.get(), 1, "default() must not run on duplicate");
+
+        // Value remains the original one
+        let h = m.find(&"k".to_string()).unwrap();
+        assert_eq!(h.value_ref(&m), Some(&"v".to_string()));
+    }
+
+    #[test]
+    fn insert_with_value_equivalence() {
+        let mut m1: HandleHashMap<&'static str, i32> = HandleHashMap::new();
+        let mut m2: HandleHashMap<&'static str, i32> = HandleHashMap::new();
+
+        let h1 = m1.insert("a", 1).unwrap();
+        let h2 = m2.insert_with("a", || 1).unwrap();
+
+        assert!(m1.contains_key(&"a"));
+        assert!(m2.contains_key(&"a"));
+        assert_eq!(h1.value_ref(&m1), h2.value_ref(&m2));
+
+        // insert_with rejects duplicate just like insert
+        assert!(m1.insert_with("a", || 2).is_err());
+        assert!(m2.insert_with("a", || 3).is_err());
     }
 }

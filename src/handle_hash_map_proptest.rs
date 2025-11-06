@@ -5,9 +5,11 @@
 
 use crate::handle_hash_map::{Handle, HandleHashMap, InsertError};
 use proptest::prelude::*;
+use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 // Key newtype with Borrow<str> to exercise borrowed lookup.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -28,6 +30,7 @@ impl std::borrow::Borrow<str> for Key {
 #[derive(Clone, Debug)]
 enum OpI {
     Insert(usize, i32),
+    InsertWith(usize, i32),
     Remove(usize),
     Find(usize),
     Contains(String),
@@ -46,6 +49,7 @@ fn arb_scenario() -> impl Strategy<Value = (Vec<String>, Vec<OpI>)> {
         let contains_pool = proptest::sample::select(pool.clone());
         let op = prop_oneof![
             (idx.clone(), any::<i32>()).prop_map(|(i, v)| OpI::Insert(i, v)),
+            (idx.clone(), any::<i32>()).prop_map(|(i, v)| OpI::InsertWith(i, v)),
             idx.clone().prop_map(OpI::Remove),
             idx.clone().prop_map(OpI::Find),
             prop_oneof![
@@ -70,6 +74,7 @@ proptest! {
         let mut live: HashMap<Key, Handle> = HashMap::new();
         let mut stale: Vec<Handle> = Vec::new();
 
+        let default_calls = Rc::new(Cell::new(0));
         for op in ops {
             match op {
                 OpI::Insert(i, v) => {
@@ -84,6 +89,25 @@ proptest! {
                         }
                         Err(InsertError::DuplicateKey) => {
                             prop_assert!(already, "duplicate error only when key exists");
+                        }
+                    }
+                }
+                OpI::InsertWith(i, v) => {
+                    let k = key_from(&pool, i);
+                    let already = model.contains_key(&k);
+                    let counter = default_calls.clone();
+                    let before = counter.get();
+                    match sut.insert_with(k.clone(), move || { counter.set(counter.get() + 1); v }) {
+                        Ok(h) => {
+                            prop_assert!(!already, "insert_with must fail on duplicate");
+                            prop_assert_eq!(default_calls.get(), before + 1, "default must run exactly once on success");
+                            let prev = live.insert(k.clone(), h);
+                            prop_assert!(prev.is_none());
+                            model.insert(k, v);
+                        }
+                        Err(InsertError::DuplicateKey) => {
+                            prop_assert!(already, "duplicate error only when key exists");
+                            prop_assert_eq!(default_calls.get(), before, "default must not run on duplicate");
                         }
                     }
                 }
@@ -180,6 +204,7 @@ proptest! {
         let mut live: HashMap<Key, Handle> = HashMap::new();
         let mut stale: Vec<Handle> = Vec::new();
 
+        let default_calls = Rc::new(Cell::new(0));
         for op in ops {
             match op {
                 OpI::Insert(i, v) => {
@@ -193,6 +218,25 @@ proptest! {
                             model.insert(k, v);
                         }
                         Err(InsertError::DuplicateKey) => prop_assert!(already),
+                    }
+                }
+                OpI::InsertWith(i, v) => {
+                    let k = key_from(&pool, i);
+                    let already = model.contains_key(&k);
+                    let counter = default_calls.clone();
+                    let before = counter.get();
+                    match sut.insert_with(k.clone(), move || { counter.set(counter.get() + 1); v }) {
+                        Ok(h) => {
+                            prop_assert!(!already);
+                            prop_assert_eq!(default_calls.get(), before + 1);
+                            let prev = live.insert(k.clone(), h);
+                            prop_assert!(prev.is_none());
+                            model.insert(k, v);
+                        }
+                        Err(InsertError::DuplicateKey) => {
+                            prop_assert!(already);
+                            prop_assert_eq!(default_calls.get(), before);
+                        }
                     }
                 }
                 OpI::Remove(i) => {
