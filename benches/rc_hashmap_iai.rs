@@ -68,6 +68,40 @@ mod bench {
             drop(x);
         }
     }
+
+    // Insert 1000 entries, keep Refs, then cycle and increment each value via handle.
+    pub fn rc_hashmap_ref_increment() {
+        let mut m: RcHashMap<String, u64> = RcHashMap::new();
+        let mut refs = Vec::with_capacity(1_000);
+        for (i, x) in lcg(123).take(1_000).enumerate() {
+            refs.push(m.insert(key(x), i as u64).unwrap());
+        }
+        // Perform 10k increments distributed over the 1k refs.
+        let mut idx = 0usize;
+        for _ in 0..10_000 {
+            let r = &refs[idx];
+            let v = r.value_mut(&mut m).unwrap();
+            *v = v.wrapping_add(1);
+            idx += 1;
+            if idx == refs.len() {
+                idx = 0;
+            }
+        }
+        black_box(m.len());
+    }
+
+    // Insert 100 entries and iterate mutably, incrementing each value.
+    pub fn rc_hashmap_iter_mut_increment() {
+        let mut m: RcHashMap<String, u64> = RcHashMap::new();
+        for (i, x) in lcg(999).take(100).enumerate() {
+            let _ = m.insert(key(x), i as u64).unwrap();
+        }
+        for mut item in m.iter_mut() {
+            let v = item.value_mut();
+            *v = v.wrapping_add(1);
+        }
+        black_box(m.len());
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -75,7 +109,9 @@ iai::main!(
     bench::rc_hashmap_insert_10k,
     bench::rc_hashmap_get_hit,
     bench::rc_hashmap_get_miss,
-    bench::rc_hashmap_clone_drop_ref
+    bench::rc_hashmap_clone_drop_ref,
+    bench::rc_hashmap_ref_cycle_increment,
+    bench::rc_hashmap_iter_mut_increment
 );
 
 #[cfg(not(target_os = "linux"))]
