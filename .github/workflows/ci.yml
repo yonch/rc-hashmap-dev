@@ -27,6 +27,19 @@ jobs:
       - name: Tests
         run: cargo test --all-features --verbose
 
+  iai-bench:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
       - name: Install valgrind (cached)
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
