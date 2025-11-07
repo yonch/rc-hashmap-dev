@@ -21,11 +21,11 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
       - name: Tests
         run: cargo test --all-features --verbose
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   iai-bench:
     runs-on: ubuntu-latest
