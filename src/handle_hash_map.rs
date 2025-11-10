@@ -14,11 +14,11 @@ impl Handle {
     pub(crate) fn new(k: DefaultKey) -> Self {
         Handle(k)
     }
-    pub(crate) fn key(&self) -> DefaultKey {
+    pub(crate) fn raw_handle(&self) -> DefaultKey {
         self.0
     }
 
-    pub fn key_ref<'a, K, V, S>(&self, map: &'a HandleHashMap<K, V, S>) -> Option<&'a K>
+    pub fn key<'a, K, V, S>(&self, map: &'a HandleHashMap<K, V, S>) -> Option<&'a K>
     where
         K: Eq + Hash,
         S: BuildHasher + Clone + Default,
@@ -26,7 +26,7 @@ impl Handle {
         map.handle_key(*self)
     }
 
-    pub fn value_ref<'a, K, V, S>(&self, map: &'a HandleHashMap<K, V, S>) -> Option<&'a V>
+    pub fn value<'a, K, V, S>(&self, map: &'a HandleHashMap<K, V, S>) -> Option<&'a V>
     where
         K: Eq + Hash,
         S: BuildHasher + Clone + Default,
@@ -228,7 +228,7 @@ where
 
     pub fn remove(&mut self, handle: Handle) -> Option<(K, V)> {
         let _g = self.reentrancy.enter();
-        let k = handle.key();
+        let k = handle.raw_handle();
         let entry_hash = self.slots.get(k)?.hash;
 
         // Unlink from index first via occupied entry removal
@@ -242,17 +242,17 @@ where
 
     pub(crate) fn handle_key(&self, h: Handle) -> Option<&K> {
         let _g = self.reentrancy.enter();
-        self.slots.get(h.key()).map(|e| &e.key)
+        self.slots.get(h.raw_handle()).map(|e| &e.key)
     }
 
     pub(crate) fn handle_value(&self, h: Handle) -> Option<&V> {
         let _g = self.reentrancy.enter();
-        self.slots.get(h.key()).map(|e| &e.value)
+        self.slots.get(h.raw_handle()).map(|e| &e.value)
     }
 
     pub(crate) fn handle_value_mut(&mut self, h: Handle) -> Option<&mut V> {
         let _g = self.reentrancy.enter();
-        self.slots.get_mut(h.key()).map(|e| &mut e.value)
+        self.slots.get_mut(h.raw_handle()).map(|e| &mut e.value)
     }
 
     pub fn iter(&self) -> Iter<'_, K, V, S> {
@@ -331,8 +331,8 @@ mod tests {
     fn handle_access_and_mutation() {
         let mut m: HandleHashMap<String, i32> = HandleHashMap::new();
         let h = m.insert("k1".to_string(), 10).unwrap();
-        assert_eq!(h.key_ref(&m), Some(&"k1".to_string()));
-        assert_eq!(h.value_ref(&m), Some(&10));
+        assert_eq!(h.key(&m), Some(&"k1".to_string()));
+        assert_eq!(h.value(&m), Some(&10));
         let new_val = h
             .value_mut(&mut m)
             .map(|v| {
@@ -341,10 +341,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(new_val, 15);
-        assert_eq!(h.value_ref(&m), Some(&15));
+        assert_eq!(h.value(&m), Some(&15));
 
         let (_k, _v) = m.remove(h).unwrap();
-        assert!(h.value_ref(&m).is_none());
+        assert!(h.value(&m).is_none());
     }
 
     /// Invariant: Removing an entry invalidates its handle and does not alias a new
@@ -357,7 +357,7 @@ mod tests {
         // Next insert likely reuses the freed slot with bumped generation.
         let h2 = m.insert("new".to_string(), 2).unwrap();
         assert_ne!(h1, h2, "handles must differ across generations");
-        assert!(h1.value_ref(&m).is_none(), "stale handle must not resolve");
+        assert!(h1.value(&m).is_none(), "stale handle must not resolve");
         assert!(m.contains_key("new"));
         assert!(!m.contains_key("old"));
     }
@@ -382,7 +382,7 @@ mod tests {
         for k in keys {
             let h = m.find(&k.to_string()).unwrap();
             assert_eq!(
-                h.value_ref(&m),
+                h.value(&m),
                 Some(&match k {
                     "k1" => 10,
                     "k2" => 11,
@@ -421,8 +421,8 @@ mod tests {
         let ha = m.find(&"a".to_string()).expect("find a");
         let hb = m.find(&"b".to_string()).expect("find b");
         assert_ne!(ha, hb);
-        assert_eq!(ha.key_ref(&m), Some(&"a".to_string()));
-        assert_eq!(hb.key_ref(&m), Some(&"b".to_string()));
+        assert_eq!(ha.key(&m), Some(&"a".to_string()));
+        assert_eq!(hb.key(&m), Some(&"b".to_string()));
     }
 
     /// Invariant: `remove` unlinks the entry from the index before user `Drop` code for
@@ -583,7 +583,7 @@ mod tests {
 
         // Value remains the original one
         let h = m.find(&"k".to_string()).unwrap();
-        assert_eq!(h.value_ref(&m), Some(&"v".to_string()));
+        assert_eq!(h.value(&m), Some(&"v".to_string()));
     }
 
     /// Invariant: Values inserted via `insert` and `insert_with` are
@@ -598,7 +598,7 @@ mod tests {
 
         assert!(m1.contains_key(&"a"));
         assert!(m2.contains_key(&"a"));
-        assert_eq!(h1.value_ref(&m1), h2.value_ref(&m2));
+        assert_eq!(h1.value(&m1), h2.value(&m2));
 
         // insert_with rejects duplicate just like insert
         assert!(m1.insert_with("a", || 2).is_err());

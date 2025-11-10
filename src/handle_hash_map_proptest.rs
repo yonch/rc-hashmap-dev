@@ -175,7 +175,7 @@ proptest! {
             // Post-conditions after each op
             // 1) All stale handles must not resolve
             for &h in &stale {
-                prop_assert!(h.value_ref(&sut).is_none());
+                prop_assert!(h.value(&sut).is_none());
             }
             // 2) Size parity
             prop_assert_eq!(sut.len(), model.len());
@@ -289,7 +289,7 @@ proptest! {
                 }
             }
 
-            for &h in &stale { prop_assert!(h.value_ref(&sut).is_none()); }
+            for &h in &stale { prop_assert!(h.value(&sut).is_none()); }
             prop_assert_eq!(sut.len(), model.len());
             prop_assert_eq!(sut.is_empty(), model.is_empty());
         }
