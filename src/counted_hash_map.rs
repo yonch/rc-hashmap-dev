@@ -73,6 +73,15 @@ where
     }
 }
 
+impl<K, V> Default for CountedHashMap<K, V>
+where
+    K: Eq + core::hash::Hash,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Iterator over immutable entries yielding a CountedHandle and refs.
 pub(crate) struct Iter<'a, K, V, S> {
     pub(crate) it: crate::handle_hash_map::Iter<'a, K, Counted<V>, S>,
@@ -329,8 +338,8 @@ mod tests {
             }
 
             // Drain remaining handles and verify emptiness condition is consistent
-            for k in 0..keys {
-                while let Some(h) = live[k].pop() { let _ = m.put(h); }
+            for (k, handles) in live.iter_mut().enumerate() {
+                while let Some(h) = handles.pop() { let _ = m.put(h); }
                 let key = format!("k{}", k);
                 prop_assert_eq!(m.contains_key(&key), false);
             }

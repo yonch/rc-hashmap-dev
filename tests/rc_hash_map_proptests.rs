@@ -165,7 +165,9 @@ proptest! {
 
             let expected_len = alive.iter().filter(|&&b| b).count();
             prop_assert_eq!(m.len(), expected_len);
-            for t in 0..n { prop_assert_eq!(m.contains_key(&key(t)), alive[t]); }
+            for (t, alive_t) in alive.iter().enumerate() {
+                prop_assert_eq!(m.contains_key(&key(t)), *alive_t);
+            }
         }
 
         // After dropping all external Refs, only nodes reachable from none remain (i.e., none).

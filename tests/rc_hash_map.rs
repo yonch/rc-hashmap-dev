@@ -152,15 +152,15 @@ use std::fmt;
 #[derive(Clone)]
 struct K {
     id: u32,
-    hold: Option<Ref<K, V>>, // key may hold a Ref to another entry
+    _hold: Option<Ref<K, V>>, // key may hold a Ref to another entry
 }
 
 impl K {
     fn new(id: u32) -> Self {
-        Self { id, hold: None }
+        Self { id, _hold: None }
     }
     fn with_ref(id: u32, r: Ref<K, V>) -> Self {
-        Self { id, hold: Some(r) }
+        Self { id, _hold: Some(r) }
     }
 }
 
@@ -196,7 +196,7 @@ impl fmt::Debug for V {
 type M = RcHashMap<K, V>;
 
 fn probe(id: u32) -> K {
-    K { id, hold: None }
+    K { id, _hold: None }
 }
 
 // Test: cascade via value-held Ref.
