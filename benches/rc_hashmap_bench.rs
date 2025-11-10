@@ -1,7 +1,8 @@
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use rand_core::{RngCore, SeedableRng};
 use rand_pcg::Lcg128Xsl64 as Pcg;
 use rc_hashmap::RcHashMap;
+use std::hint::black_box;
 
 fn key(n: u64) -> String {
     format!("k{:016x}", n)

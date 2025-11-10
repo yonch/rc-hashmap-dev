@@ -17,7 +17,7 @@ slotmap = "1"
 hashbrown = { version = "0.16" }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.7"
 proptest = "1"
 rand_pcg = "0.3"
 rand_core = "0.6"
