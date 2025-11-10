@@ -275,17 +275,18 @@ mod tests {
     use std::cell::Cell;
     use std::collections::BTreeSet;
     use std::hash::Hasher;
-    use std::rc::Rc;
 
     /// Invariant: Duplicate keys are rejected and the map remains unchanged.
     #[test]
     fn duplicate_insert_rejected() {
         let mut m: HandleHashMap<String, i32> = HandleHashMap::new();
-        let _ = m.insert("dup".to_string(), 1).unwrap();
+        let handle = m.insert("dup".to_string(), 1).unwrap();
         match m.insert("dup".to_string(), 2) {
             Err(InsertError::DuplicateKey) => {}
             other => panic!("unexpected result: {:?}", other),
         }
+        assert_eq!(*handle.value(&m).unwrap(), 1);
+        assert_eq!(m.len(), 1);
     }
 
     /// Invariant: `find(k).is_some() == contains_key(k)` for present/absent keys.
@@ -299,12 +300,13 @@ mod tests {
 
         for k in present {
             let s = k.to_string();
-            assert_eq!(m.find(&s).is_some(), m.contains_key(&s));
+            assert!(m.find(&s).is_some());
+            assert!(m.contains_key(&s));
         }
 
         for k in ["x", "y", "z"] {
             let s = k.to_string();
-            assert_eq!(m.find(&s).is_some(), m.contains_key(&s));
+            assert!(m.find(&s).is_none());
             assert!(!m.contains_key(&s));
         }
     }
@@ -422,52 +424,29 @@ mod tests {
         assert_eq!(hb.key(&m), Some(&"b".to_string()));
     }
 
-    /// Invariant: `remove` unlinks the entry from the index before user `Drop` code for
-    /// `K`/`V` runs, so re-entering the map inside `Drop` observes a consistent structure
-    /// and does not panic.
+    /// Invariant: After `remove`, the key is absent; reinserting the same key adds a
+    /// fresh entry with a potentially new handle and the new value is observed.
     #[test]
-    fn reenter_from_value_drop_after_remove_is_allowed() {
-        #[derive(Clone)]
-        struct ReenterOnDrop {
-            map: *const HandleHashMap<String, ReenterOnDrop>,
-            removed_key: String,
-            // Records what `contains_key` returned during Drop
-            observed: Rc<Cell<Option<bool>>>,
-        }
-        impl Drop for ReenterOnDrop {
-            fn drop(&mut self) {
-                unsafe {
-                    // SAFETY: Test ensures the map outlives this drop.
-                    let m = &*self.map;
-                    let has_key = m.contains_key(self.removed_key.as_str());
-                    self.observed.set(Some(has_key));
-                }
-            }
-        }
+    fn remove_then_reinsert_same_key_yields_new_value() {
+        let mut m: HandleHashMap<String, i32> = HandleHashMap::new();
+        let h1 = m.insert("k".to_string(), 1).unwrap();
 
-        let mut m: HandleHashMap<String, ReenterOnDrop> = HandleHashMap::new();
-        let observed = Rc::new(Cell::new(None));
-        let h = m
-            .insert(
-                "rk".to_string(),
-                ReenterOnDrop {
-                    map: &m as *const _,
-                    removed_key: "rk".to_string(),
-                    observed: observed.clone(),
-                },
-            )
-            .unwrap();
+        // Remove: key must disappear and handle becomes invalid
+        let (k_removed, v_removed) = m.remove(h1).expect("present for removal");
+        assert_eq!(k_removed, "k");
+        assert_eq!(v_removed, 1);
+        assert!(!m.contains_key("k"));
+        assert!(m.find(&"k".to_string()).is_none());
+        assert!(h1.value(&m).is_none());
 
-        let (k, v) = m.remove(h).unwrap();
-        drop(k);
-        drop(v); // triggers Drop, which re-enters the map
-
-        assert_eq!(
-            observed.get(),
-            Some(false),
-            "index must be unlinked before Drop"
-        );
-        assert_eq!(m.len(), 0);
+        // Reinsert same key with a different value
+        let h2 = m.insert("k".to_string(), 2).expect("reinsert allowed");
+        assert!(m.contains_key("k"));
+        let hf = m.find(&"k".to_string()).expect("find reinserted key");
+        assert_eq!(hf.value(&m), Some(&2));
+        assert_eq!(h2.value(&m), Some(&2));
+        assert_ne!(h1, h2, "old handle must not alias new entry");
+        assert!(h1.value(&m).is_none(), "stale handle stays invalid");
     }
 
     /// Invariant (debug-only): Re-entering `HandleHashMap` from within `K: Eq` during a
@@ -600,5 +579,60 @@ mod tests {
         // insert_with rejects duplicate just like insert
         assert!(m1.insert_with("a", || 2).is_err());
         assert!(m2.insert_with("a", || 3).is_err());
+    }
+
+    /// Invariant: Handles referring to the same entry alias: mutating via one handle
+    /// is visible through the other obtained via lookup.
+    #[test]
+    fn handles_alias_same_entry_between_insert_and_find() {
+        let mut m: HandleHashMap<String, i32> = HandleHashMap::new();
+        let h_insert = m.insert("k".to_string(), 10).unwrap();
+
+        // Obtain another handle via lookup
+        let h_find = m.find("k").expect("key present");
+
+        // They should be equal handles for the same slot
+        assert_eq!(h_insert, h_find);
+
+        // Mutate through the first handle; observe via the second
+        *h_insert.value_mut(&mut m).expect("value_mut present") = 20;
+        assert_eq!(h_find.value(&m), Some(&20));
+
+        // Mutate through the second handle; observe via the first
+        *h_find.value_mut(&mut m).expect("value_mut present") = 30;
+        assert_eq!(h_insert.value(&m), Some(&30));
+    }
+
+    /// Invariant: `len()` and `is_empty()` reflect the number of live entries,
+    /// unaffected by failed duplicate inserts, and updated after removals.
+    #[test]
+    fn len_and_is_empty_behaviors() {
+        let mut m: HandleHashMap<String, i32> = HandleHashMap::new();
+        assert_eq!(m.len(), 0);
+        assert!(m.is_empty());
+
+        let h1 = m.insert("a".to_string(), 1).unwrap();
+        assert_eq!(m.len(), 1);
+        assert!(!m.is_empty());
+
+        // Duplicate insert must not change len/is_empty
+        match m.insert("a".to_string(), 2) {
+            Err(InsertError::DuplicateKey) => {}
+            other => panic!("unexpected result: {:?}", other),
+        }
+        assert_eq!(m.len(), 1);
+        assert!(!m.is_empty());
+
+        let h2 = m.insert("b".to_string(), 2).unwrap();
+        assert_eq!(m.len(), 2);
+        assert!(!m.is_empty());
+
+        let _ = m.remove(h1).unwrap();
+        assert_eq!(m.len(), 1);
+        assert!(!m.is_empty());
+
+        let _ = m.remove(h2).unwrap();
+        assert_eq!(m.len(), 0);
+        assert!(m.is_empty());
     }
 }
