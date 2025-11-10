@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
-use rc_hashmap::counted_hash_map::{CountedHashMap, PutResult};
+use rc_hashmap::counted_hash_map::CountedHashMap;
 use std::time::Duration;
 
 fn lcg(mut s: u64) -> impl Iterator<Item = u64> {
@@ -22,9 +22,8 @@ fn bench_insert_fresh_100k(c: &mut Criterion) {
                 for (i, x) in lcg(1).take(100_000).enumerate() {
                     hs.push(m.insert(key(x), i as u64).unwrap());
                 }
-                // Return tokens to avoid panic; included in measurement.
-                for h in hs { let _ = m.put(h); }
-                black_box(m)
+                // Defer token return to after timing to avoid skewing insert cost
+                black_box(ReturnTokensOnDrop { m, handles: hs })
             },
             BatchSize::SmallInput,
         )
@@ -50,8 +49,8 @@ fn bench_insert_warm_100k(c: &mut Criterion) {
                 for (i, x) in lcg(3).take(100_000).enumerate() {
                     hs.push(m.insert(key(x), i as u64).unwrap());
                 }
-                for h in hs { let _ = m.put(h); }
-                black_box(m)
+                // Defer token return to after timing to avoid skewing insert cost
+                black_box(ReturnTokensOnDrop { m, handles: hs })
             },
             BatchSize::SmallInput,
         )
@@ -63,32 +62,30 @@ fn bench_remove_random_10k(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let mut m = CountedHashMap::new();
-                let handles: Vec<Option<_>> = lcg(5)
+                let all: Vec<_> = lcg(5)
                     .take(110_000)
                     .enumerate()
-                    .map(|(i, x)| Some(m.insert(key(x), i as u64).unwrap()))
+                    .map(|(i, x)| m.insert(key(x), i as u64).unwrap())
                     .collect();
-                (m, handles)
-            },
-            |(mut m, mut handles)| {
-                // Remove 10k pseudo-random via put(); skip duplicates.
+                // Precompute 10k unique indices via LCG
+                let n = all.len();
+                let mut sel = std::collections::HashSet::with_capacity(10_000);
                 let mut s = 0x9e3779b97f4a7c15u64;
-                let n = handles.len() as u64;
-                let mut removed = 0usize;
-                while removed < 10_000 {
+                while sel.len() < 10_000 {
                     s = s.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
-                    let idx = (s % n) as usize;
-                    if let Some(h) = handles.get_mut(idx).and_then(Option::take) {
-                        match m.put(h) {
-                            PutResult::Live => {}
-                            PutResult::Removed { .. } => {}
-                        }
-                        removed += 1;
-                    }
+                    sel.insert((s as usize) % n);
                 }
-                // Return remaining tokens
-                for h in handles.into_iter().flatten() { let _ = m.put(h); }
-                black_box(m)
+                let mut to_remove = Vec::with_capacity(10_000);
+                let mut remain = Vec::with_capacity(n - 10_000);
+                for (i, h) in all.into_iter().enumerate() {
+                    if sel.contains(&i) { to_remove.push(h); } else { remain.push(h); }
+                }
+                (m, to_remove, remain)
+            },
+            |(mut m, to_remove, remain)| {
+                for h in to_remove { let _ = m.put(h); }
+                // Defer return of remaining tokens to after timing
+                black_box(ReturnTokensOnDrop { m, handles: remain })
             },
             BatchSize::SmallInput,
         )
@@ -107,12 +104,17 @@ fn bench_find_hit_10k(c: &mut Criterion) {
             .collect();
         // Keep tokens alive for the duration of the benchmark; avoid drop at end.
         core::mem::forget(held);
-        let mut it = keys.iter().cycle();
+        // Precompute 10k random query keys using LCG
+        let n = keys.len();
+        let mut s = 0x9e3779b97f4a7c15u64;
+        let queries: Vec<String> = (0..10_000)
+            .map(|_| {
+                s = s.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
+                keys[(s as usize) % n].clone()
+            })
+            .collect();
         b.iter(|| {
-            for _ in 0..10_000 {
-                let k = it.next().unwrap();
-                if let Some(h) = m.find(k) { let _ = m.put(h); }
-            }
+            for k in &queries { if let Some(h) = m.find(k) { let _ = m.put(h); } }
         })
     });
 }
@@ -136,31 +138,58 @@ fn bench_find_miss_10k(c: &mut Criterion) {
     });
 }
 
+// Guard that returns tokens to the map on drop, so cleanup happens
+// outside the measured closure time in `iter_batched`.
+struct ReturnTokensOnDrop {
+    m: CountedHashMap<String, u64>,
+    handles: Vec<rc_hashmap::counted_hash_map::CountedHandle<'static>>,
+}
+impl Drop for ReturnTokensOnDrop {
+    fn drop(&mut self) {
+        for h in self.handles.drain(..) { let _ = self.m.put(h); }
+    }
+}
+
+
+// Guard that holds separate sets of tokens and returns all on drop
+struct CountedAccessGuard {
+    m: CountedHashMap<String, u64>,
+    a: Vec<rc_hashmap::counted_hash_map::CountedHandle<'static>>,
+    b: Vec<rc_hashmap::counted_hash_map::CountedHandle<'static>>,
+}
+impl Drop for CountedAccessGuard {
+    fn drop(&mut self) {
+        for h in self.a.drain(..) { let _ = self.m.put(h); }
+        for h in self.b.drain(..) { let _ = self.m.put(h); }
+    }
+}
+
 fn bench_handle_access_increment(c: &mut Criterion) {
     c.bench_function("counted::handle_access_increment_10k", |b| {
         b.iter_batched(
             || {
                 let mut m = CountedHashMap::new();
                 let handles: Vec<_> = lcg(123)
-                    .take(10_000)
+                    .take(100_000)
                     .enumerate()
                     .map(|(i, x)| m.insert(key(x), i as u64).unwrap())
                     .collect();
-                (m, handles)
-            },
-            |(mut m, handles)| {
-                let mut idx = 0usize;
+                // Precompute 10k random counted handles to touch by minting tokens via get()
+                let n = handles.len();
+                let mut s = 0x9e3779b97f4a7c15u64;
+                let mut targets = Vec::with_capacity(10_000);
                 for _ in 0..10_000 {
-                    let h = &handles[idx];
-                    if let Some(v) = h.value_mut(&mut m) {
-                        *v = v.wrapping_add(1);
-                    }
-                    idx += 1;
-                    if idx == handles.len() { idx = 0; }
+                    s = s.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
+                    let idx = (s as usize) % n;
+                    let h = m.get(&handles[idx]);
+                    targets.push(h);
                 }
-                // Return tokens to avoid panic
-                for h in handles { let _ = m.put(h); }
-                black_box(m)
+                (m, targets, handles)
+            },
+            |(mut m, targets, handles)| {
+                for h in &targets { if let Some(v) = h.value_mut(&mut m) { *v = v.wrapping_add(1); } }
+                // Return all tokens after timing
+                black_box(CountedAccessGuard { m, a: targets, b: handles })
             },
             BatchSize::SmallInput,
         )

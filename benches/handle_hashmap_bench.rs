@@ -64,17 +64,19 @@ fn bench_remove_random_10k(c: &mut Criterion) {
                     .enumerate()
                     .map(|(i, x)| m.insert(key(x), i as u64).unwrap())
                     .collect();
-                (m, handles)
-            },
-            |(mut m, handles)| {
-                // Remove 10k pseudo-random using an LCG index
+                // Precompute 10k unique indices via LCG
+                let n = handles.len();
+                let mut sel = std::collections::HashSet::with_capacity(10_000);
                 let mut s = 0x9e3779b97f4a7c15u64;
-                let n = handles.len() as u64;
-                for _ in 0..10_000 {
+                while sel.len() < 10_000 {
                     s = s.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
-                    let idx = (s % n) as usize;
-                    let _ = m.remove(handles[idx]);
+                    sel.insert((s as usize) % n);
                 }
+                let to_remove: Vec<Handle> = sel.into_iter().map(|i| handles[i]).collect();
+                (m, to_remove)
+            },
+            |(mut m, to_remove)| {
+                for h in to_remove { let _ = m.remove(h); }
                 black_box(m)
             },
             BatchSize::SmallInput,
@@ -89,12 +91,17 @@ fn bench_find_hit_10k(c: &mut Criterion) {
         for (i, k) in keys.iter().enumerate() {
             let _ = m.insert(k.clone(), i as u64).unwrap();
         }
-        let mut it = keys.iter().cycle();
+        // Precompute 10k random query keys using LCG
+        let n = keys.len();
+        let mut s = 0x9e3779b97f4a7c15u64;
+        let queries: Vec<String> = (0..10_000)
+            .map(|_| {
+                s = s.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
+                keys[(s as usize) % n].clone()
+            })
+            .collect();
         b.iter(|| {
-            for _ in 0..10_000 {
-                let k = it.next().unwrap();
-                black_box(m.find(k));
-            }
+            for k in &queries { black_box(m.find(k)); }
         })
     });
 }
@@ -121,23 +128,24 @@ fn bench_handle_access_increment(c: &mut Criterion) {
             || {
                 let mut m = HandleHashMap::new();
                 let handles: Vec<_> = lcg(123)
-                    .take(10_000)
+                    .take(100_000)
                     .enumerate()
                     .map(|(i, x)| m.insert(key(x), i as u64).unwrap())
                     .collect();
-                (m, handles)
+                // Precompute 10k random handles to touch
+                let n = handles.len();
+                let mut s = 0x9e3779b97f4a7c15u64;
+                let targets: Vec<Handle> = (0..10_000)
+                    .map(|_| {
+                        s = s.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
+                        handles[(s as usize) % n]
+                    })
+                    .collect();
+                (m, targets)
             },
-            |(mut m, handles)| {
-                let mut idx = 0usize;
-                for _ in 0..10_000 {
-                    let h = handles[idx];
-                    if let Some(v) = h.value_mut(&mut m) {
-                        *v = v.wrapping_add(1);
-                    }
-                    idx += 1;
-                    if idx == handles.len() {
-                        idx = 0;
-                    }
+            |(mut m, targets)| {
+                for h in targets {
+                    if let Some(v) = h.value_mut(&mut m) { *v = v.wrapping_add(1); }
                 }
                 black_box(m)
             },

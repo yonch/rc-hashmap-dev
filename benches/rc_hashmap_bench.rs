@@ -59,25 +59,30 @@ fn bench_remove_random_10k(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let mut m = RcHashMap::new();
-                let refs: Vec<Option<_>> = lcg(5)
+                let all: Vec<_> = lcg(5)
                     .take(110_000)
                     .enumerate()
-                    .map(|(i, x)| Some(m.insert(key(x), i as u64).unwrap()))
+                    .map(|(i, x)| m.insert(key(x), i as u64).unwrap())
                     .collect();
-                (m, refs)
-            },
-            |(m, mut refs)| {
-                // Remove 10k pseudo-random by dropping refs
+                // Precompute 10k unique indices via LCG
+                let n = all.len();
+                let mut sel = std::collections::HashSet::with_capacity(10_000);
                 let mut s = 0x9e3779b97f4a7c15u64;
-                let n = refs.len() as u64;
-                for _ in 0..10_000 {
+                while sel.len() < 10_000 {
                     s = s.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
-                    let idx = (s % n) as usize;
-                    if let Some(r) = refs.get_mut(idx).and_then(|slot| slot.take()) {
-                        drop(r);
-                    }
+                    sel.insert((s as usize) % n);
                 }
-                black_box(m)
+                let mut to_drop = Vec::with_capacity(10_000);
+                let mut remain = Vec::with_capacity(n - 10_000);
+                for (i, r) in all.into_iter().enumerate() {
+                    if sel.contains(&i) { to_drop.push(r); } else { remain.push(r); }
+                }
+                (m, to_drop, remain)
+            },
+            |(m, to_drop, remain)| {
+                for r in to_drop { drop(r); }
+                // Defer drop of remaining refs to after timing
+                black_box((m, remain))
             },
             BatchSize::SmallInput,
         )
@@ -94,13 +99,17 @@ fn bench_get_hit_10k(c: &mut Criterion) {
             .enumerate()
             .map(|(i, k)| m.insert(k, i as u64).unwrap())
             .collect();
-        let mut it = keys.iter().cycle();
+        // Precompute 10k random query keys using LCG
+        let n = keys.len();
+        let mut s = 0x9e3779b97f4a7c15u64;
+        let queries: Vec<String> = (0..10_000)
+            .map(|_| {
+                s = s.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
+                keys[(s as usize) % n].clone()
+            })
+            .collect();
         b.iter(|| {
-            for _ in 0..10_000 {
-                let k = it.next().unwrap();
-                let r = m.find(k).unwrap();
-                black_box(r);
-            }
+            for k in &queries { let r = m.find(k).unwrap(); black_box(r); }
         })
     });
 }
@@ -127,24 +136,28 @@ fn bench_handle_access_increment(c: &mut Criterion) {
             || {
                 let mut m: RcHashMap<String, u64> = RcHashMap::new();
                 let refs: Vec<_> = lcg(123)
-                    .take(10_000)
+                    .take(100_000)
                     .enumerate()
                     .map(|(i, x)| m.insert(key(x), i as u64).unwrap())
                     .collect();
-                (m, refs)
-            },
-            |(mut m, refs)| {
-                let mut idx = 0usize;
+                // Precompute 10k random refs to touch
+                let n = refs.len();
+                let mut s = 0x9e3779b97f4a7c15u64;
+                let mut targets = Vec::with_capacity(10_000);
+                // Select indices (allow duplicates; cheaper)
                 for _ in 0..10_000 {
-                    let r = &refs[idx];
-                    let v = r.value_mut(&mut m).unwrap();
-                    *v = v.wrapping_add(1);
-                    idx += 1;
-                    if idx == refs.len() {
-                        idx = 0;
-                    }
+                    s = s.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
+                    let idx = (s as usize) % n;
+                    targets.push(refs[idx].clone());
                 }
-                black_box(m)
+                // Keep original refs alive as well to avoid removal; drop after timing
+                let remain = refs;
+                (m, targets, remain)
+            },
+            |(mut m, targets, remain)| {
+                for r in &targets { let v = r.value_mut(&mut m).unwrap(); *v = v.wrapping_add(1); }
+                // Return both map and refs so ref-drop occurs after timing
+                black_box((m, targets, remain))
             },
             BatchSize::SmallInput,
         )
