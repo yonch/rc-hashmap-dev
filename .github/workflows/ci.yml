@@ -42,6 +42,9 @@ jobs:
         with:
           shared-key: benches
 
+      - name: Install cargo-criterion (prime cache)
+        run: cargo install cargo-criterion --debug
+
       - name: Compile benches only
         run: cargo bench --no-run --benches --verbose
 
