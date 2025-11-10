@@ -1,15 +1,17 @@
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use rand_core::{RngCore, SeedableRng};
 use rand_pcg::Lcg128Xsl64 as Pcg;
 use rc_hashmap::RcHashMap;
-use std::time::Duration;
 
 fn key(n: u64) -> String {
     format!("k{:016x}", n)
 }
 
-fn bench_insert_fresh_100k(c: &mut Criterion) {
-    c.bench_function("rc::insert_fresh_100k", |b| {
+fn bench_insert(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rc::insert");
+    group.throughput(Throughput::Elements(100_000));
+    // fresh_100k
+    group.bench_function("fresh_100k", |b| {
         b.iter_batched(
             RcHashMap::<String, u64>::new,
             |mut m| {
@@ -23,10 +25,8 @@ fn bench_insert_fresh_100k(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
-}
-
-fn bench_insert_warm_100k(c: &mut Criterion) {
-    c.bench_function("rc::insert_warm_100k", |b| {
+    // warm_100k
+    group.bench_function("warm_100k", |b| {
         b.iter_batched(
             || {
                 let mut m = RcHashMap::new();
@@ -48,10 +48,13 @@ fn bench_insert_warm_100k(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
+    group.finish();
 }
 
-fn bench_remove_random_10k(c: &mut Criterion) {
-    c.bench_function("rc::remove_random_10k_of_110k", |b| {
+fn bench_remove(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rc::remove");
+    group.throughput(Throughput::Elements(10_000));
+    group.bench_function("random_10k_of_110k", |b| {
         b.iter_batched(
             || {
                 let mut m = RcHashMap::new();
@@ -79,10 +82,14 @@ fn bench_remove_random_10k(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
+    group.finish();
 }
 
-fn bench_get_hit_10k(c: &mut Criterion) {
-    c.bench_function("rc::get_hit_10k_on_100k", |b| {
+fn bench_query(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rc::query");
+    group.throughput(Throughput::Elements(10_000));
+    // hit 10k
+    group.bench_function("hit_10k_on_100k", |b| {
         let mut m = RcHashMap::new();
         let mut rng_keys = Pcg::seed_from_u64(7);
         let keys: Vec<_> = (0..100_000).map(|_| key(rng_keys.next_u64())).collect();
@@ -102,10 +109,8 @@ fn bench_get_hit_10k(c: &mut Criterion) {
             for k in &queries { let r = m.find(k).unwrap(); black_box(r); }
         })
     });
-}
-
-fn bench_get_miss_10k(c: &mut Criterion) {
-    c.bench_function("rc::get_miss_10k_on_100k", |b| {
+    // miss 10k
+    group.bench_function("miss_10k_on_100k", |b| {
         let mut m = RcHashMap::new();
         let mut rng_ins = Pcg::seed_from_u64(11);
         for i in 0..100_000 {
@@ -119,10 +124,14 @@ fn bench_get_miss_10k(c: &mut Criterion) {
             }
         })
     });
+    group.finish();
 }
 
-fn bench_handle_access_increment(c: &mut Criterion) {
-    c.bench_function("rc::handle_access_increment_10k", |b| {
+fn bench_access(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rc::access");
+    group.throughput(Throughput::Elements(100_000));
+    // random access increment 10k
+    group.bench_function("random_increment_100k", |b| {
         b.iter_batched(
             || {
                 let mut m: RcHashMap<String, u64> = RcHashMap::new();
@@ -134,7 +143,7 @@ fn bench_handle_access_increment(c: &mut Criterion) {
                 let n = refs.len();
                 let mut rsel = Pcg::seed_from_u64(0x9e3779b97f4a7c15);
                 let mut targets = Vec::with_capacity(10_000);
-                for _ in 0..10_000 {
+                for _ in 0..100_000 {
                     let idx = (rsel.next_u64() as usize) % n;
                     targets.push(refs[idx].clone());
                 }
@@ -150,10 +159,8 @@ fn bench_handle_access_increment(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
-}
-
-fn bench_iter_and_iter_mut(c: &mut Criterion) {
-    c.bench_function("rc::iter_all_100k", |b| {
+    // iter all 100k
+    group.bench_function("iter_all_100k", |b| {
         let mut m = RcHashMap::new();
         let mut rng = Pcg::seed_from_u64(999);
         let _held: Vec<_> = (0..100_000)
@@ -167,8 +174,9 @@ fn bench_iter_and_iter_mut(c: &mut Criterion) {
             black_box(cnt)
         })
     });
-
-    c.bench_function("rc::iter_mut_increment_all_100k", |b| {
+    // iter_mut increment all 100k
+    group.throughput(Throughput::Elements(100_000));
+    group.bench_function("iter_mut_increment_all_100k", |b| {
         b.iter_batched(
             || {
                 let mut m: RcHashMap<String, u64> = RcHashMap::new();
@@ -188,27 +196,23 @@ fn bench_iter_and_iter_mut(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
+    group.finish();
 }
 
 fn bench_config() -> Criterion {
     Criterion::default()
-        .sample_size(12)
-        .measurement_time(Duration::from_secs(5))
-        .warm_up_time(Duration::from_secs(1))
 }
 
 criterion_group! {
-    name = benches_insert;
+    name = benches_rc_insert;
     config = bench_config();
-    targets = bench_insert_fresh_100k, bench_insert_warm_100k
+    targets = bench_insert
 }
 criterion_group! {
-    name = benches_ops;
+    name = benches_rc_ops;
     config = bench_config();
-    targets = bench_remove_random_10k,
-              bench_get_hit_10k,
-              bench_get_miss_10k,
-              bench_handle_access_increment,
-              bench_iter_and_iter_mut
+    targets = bench_remove,
+              bench_query,
+              bench_access
 }
-criterion_main!(benches_insert, benches_ops);
+criterion_main!(benches_rc_insert, benches_rc_ops);
