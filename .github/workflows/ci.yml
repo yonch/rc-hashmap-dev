@@ -27,7 +27,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-  benches:
+  benches-compile:
+    name: Benches - compile
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -36,8 +37,90 @@ jobs:
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
+      - name: Cache cargo (benches)
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: benches
 
-      - name: Run criterion benches
-        run: cargo bench --benches --verbose
+      - name: Compile benches only
+        run: cargo bench --no-run --benches --verbose
+
+  benches-run:
+    name: Benches - run (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    needs: benches-compile
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: insert fresh
+            filter: 'insert/fresh_100k$'
+          - name: insert warm
+            filter: 'insert/warm_100k$'
+          - name: remove random
+            filter: 'remove/random_10k_of_110k$'
+          - name: query hit
+            filter: 'query/hit_10k_on_100k$'
+          - name: query miss
+            filter: 'query/miss_10k_on_100k$'
+          - name: access random increment
+            filter: 'access/random_increment_100k$'
+          - name: access iter all
+            filter: 'access/iter_all_100k$'
+          - name: access iter_mut increment all
+            filter: 'access/iter_mut_increment_all_100k$'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (benches)
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: benches
+
+      - name: Install cargo-criterion
+        run: cargo install cargo-criterion --debug
+
+      - name: Run criterion matrix case
+        run: |
+          set -euo pipefail
+          fn="bench-${{ matrix.name }}.jsonl"
+          # Run across all bench targets and filter specific case across DS variants
+          cargo criterion --message-format=json -- ${{ matrix.filter }} > "$fn"
+          ls -l "$fn"
+
+      - name: Upload JSONL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-json-${{ matrix.name }}
+          path: bench-${{ matrix.name }}.jsonl
+
+  benches-aggregate:
+    name: Benches - aggregate and summarize
+    runs-on: ubuntu-latest
+    needs: benches-run
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download bench artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-json-*
+          merge-multiple: true
+
+      - name: Merge JSONL
+        run: |
+          shopt -s nullglob
+          cat bench-*.jsonl > combined.jsonl || true
+          echo "Combined lines:" $(wc -l < combined.jsonl || echo 0)
+          ls -l combined.jsonl || true
+
+      - name: Render table
+        run: |
+          python3 benches/bench_to_table.py combined.jsonl > bench-table.md
+          echo '## Benchmark Throughput (M elems/sec)' >> "$GITHUB_STEP_SUMMARY"
+          cat bench-table.md >> "$GITHUB_STEP_SUMMARY"
