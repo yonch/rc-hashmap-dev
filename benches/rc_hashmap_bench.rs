@@ -10,7 +10,8 @@ fn key(n: u64) -> String {
 }
 
 fn bench_insert(c: &mut Criterion) {
-    let mut group = c.benchmark_group(format!("rc::{}::insert", HASH_NAME));
+    let gid = format!("rc::{}::insert", HASH_NAME);
+    let mut group = c.benchmark_group(&gid);
     group.throughput(Throughput::Elements(100_000));
     // fresh_100k
     group.bench_function("fresh_100k", |b| {
@@ -54,7 +55,8 @@ fn bench_insert(c: &mut Criterion) {
 }
 
 fn bench_remove(c: &mut Criterion) {
-    let mut group = c.benchmark_group(format!("rc::{}::remove", HASH_NAME));
+    let gid = format!("rc::{}::remove", HASH_NAME);
+    let mut group = c.benchmark_group(&gid);
     group.throughput(Throughput::Elements(10_000));
     group.bench_function("random_10k_of_110k", |b| {
         b.iter_batched(
@@ -87,7 +89,8 @@ fn bench_remove(c: &mut Criterion) {
 }
 
 fn bench_query(c: &mut Criterion) {
-    let mut group = c.benchmark_group(format!("rc::{}::query", HASH_NAME));
+    let gid = format!("rc::{}::query", HASH_NAME);
+    let mut group = c.benchmark_group(&gid);
     group.throughput(Throughput::Elements(10_000));
     // hit 10k
     group.bench_function("hit_10k_on_100k", |b| {
@@ -132,7 +135,8 @@ fn bench_query(c: &mut Criterion) {
 }
 
 fn bench_access(c: &mut Criterion) {
-    let mut group = c.benchmark_group(format!("rc::{}::access", HASH_NAME));
+    let gid = format!("rc::{}::access", HASH_NAME);
+    let mut group = c.benchmark_group(&gid);
     group.throughput(Throughput::Elements(100_000));
     // random access increment 10k
     group.bench_function("random_increment_100k", |b| {
@@ -207,7 +211,7 @@ fn bench_access(c: &mut Criterion) {
 }
 
 fn bench_config() -> Criterion {
-    Criterion::default()
+    Criterion::default().sample_size(1000)
 }
 
 criterion_group! {

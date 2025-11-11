@@ -203,7 +203,7 @@ fn bench_access(c: &mut Criterion) {
 }
 
 fn bench_config() -> Criterion {
-    Criterion::default()
+    Criterion::default().sample_size(1000)
 }
 
 criterion_group! {
