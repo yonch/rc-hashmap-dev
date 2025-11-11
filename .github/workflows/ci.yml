@@ -156,4 +156,7 @@ jobs:
         run: |
           python3 benches/bench_to_table.py combined.jsonl > bench-table.md
           echo '## Benchmark Throughput (M elems/sec)' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Note: GitHub actions runners are shared, might run on old hardware, and are considered noisy. Take results with a grain of salt.' >> "$GITHUB_STEP_SUMMARY"
           cat bench-table.md >> "$GITHUB_STEP_SUMMARY"
+          echo "\n\n" >> "$GITHUB_STEP_SUMMARY"
+          echo '"access" benchmarks are not dependent on hash, so are not re-run with different hashes. These cells contain "-".' >> "$GITHUB_STEP_SUMMARY"
