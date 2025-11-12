@@ -23,7 +23,6 @@ pub struct CountedHashMap<K, V, S = DefaultHashBuilder> {
     pub(crate) inner: HandleHashMap<K, Counted<V>, S>,
 }
 
-/// Counted handle carrying a linear token branded to its entry counter instance.
 pub struct CountedHandle<'a> {
     pub(crate) handle: Handle,
     pub(crate) token: Token<'a, UsizeCount>, // owned and consumed by put()
@@ -235,6 +234,9 @@ where
         }
     }
 
+    // Simple iterators yield the same item shapes as HandleHashMap.
+    // For internal use, iter_raw and iter_mut_raw mint CountedHandles; callers must put() them.
+
     #[allow(dead_code)]
     pub fn iter(&self) -> impl Iterator<Item = (Handle, &K, &V)> {
         self.inner.iter().map(|(h, k, c)| (h, k, &c.value))
@@ -261,9 +263,6 @@ where
         }
     }
 }
-
-// Simple iterators yield the same item shapes as HandleHashMap.
-// For internal use, iter_raw and iter_mut_raw mint CountedHandles; callers must put() them.
 
 #[cfg(test)]
 mod tests {
